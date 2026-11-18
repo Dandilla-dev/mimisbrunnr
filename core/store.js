@@ -1,0 +1,297 @@
+// Настройки (settings.json) и сессии разбора (*.mimis — база SQLite).
+// sql.js — SQLite, собранный в WebAssembly: никаких нативных модулей,
+// одинаково работает на Windows, macOS и Linux.
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
+import initSqlJs from 'sql.js';
+
+const require = createRequire(import.meta.url);
+const unpacked = (p) => p.replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
+let SQL = null;
+async function sql() {
+  if (!SQL) {
+    const wasm = unpacked(require.resolve('sql.js/dist/sql-wasm.wasm'));
+    SQL = await initSqlJs({ locateFile: () => wasm });
+  }
+  return SQL;
+}
+
+function atomicWrite(file, data) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);
+}
+
+const now = () => new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+// ---------------------------------------------------------------- настройки
+
+export const DEFAULT_SETTINGS = {
+  name: '',
+  provider: { type: 'anthropic', baseUrl: '', model: '', priceIn: 0, priceOut: 0 },
+  budgetUsd: 1,
+  spend: {}, // 'YYYY-MM' → потрачено, $
+};
+
+/**
+ * crypt: { available: bool, encrypt(str)→base64, decrypt(base64)→str } — в
+ * Electron это safeStorage (ключ шифруется средствами ОС). Без него ключ
+ * хранится открытым текстом, и интерфейс об этом предупреждает.
+ */
+export class Settings {
+  constructor(dir, crypt) {
+    this.file = path.join(dir, 'settings.json');
+    this.crypt = crypt;
+    fs.mkdirSync(dir, { recursive: true });
+    try { this.data = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(this.file, 'utf8')) }; }
+    catch { this.data = structuredClone(DEFAULT_SETTINGS); }
+  }
+  _secret(field) {
+    const v = this.data[field];
+    if (!v) return '';
+    if (v.enc) { try { return this.crypt.decrypt(v.enc); } catch { return ''; } }
+    return v.plain || '';
+  }
+  _setSecret(field, value) {
+    if (value === undefined) return;
+    if (!value) { delete this.data[field]; return; }
+    this.data[field] = this.crypt?.available ? { enc: this.crypt.encrypt(value) } : { plain: value };
+  }
+  apiKey() { return this._secret('apiKey'); }
+  githubToken() { return this._secret('githubToken'); }
+  /** То, что видит интерфейс: без самих секретов. */
+  public() {
+    const { apiKey, githubToken, ...rest } = this.data;
+    return {
+      ...rest,
+      hasApiKey: Boolean(this.apiKey()),
+      hasGithubToken: Boolean(this.githubToken()),
+      keyEncrypted: Boolean(this.crypt?.available),
+      monthSpend: this.data.spend[new Date().toISOString().slice(0, 7)] || 0,
+    };
+  }
+  update(patch) {
+    const { apiKey, githubToken, ...rest } = patch;
+    if (rest.provider) rest.provider = { ...this.data.provider, ...rest.provider };
+    Object.assign(this.data, rest);
+    this._setSecret('apiKey', apiKey);
+    this._setSecret('githubToken', githubToken);
+    this.save();
+    return this.public();
+  }
+  addSpend(usd) {
+    const m = new Date().toISOString().slice(0, 7);
+    this.data.spend[m] = Math.round(((this.data.spend[m] || 0) + usd) * 1e6) / 1e6;
+    this.save();
+  }
+  save() { atomicWrite(this.file, JSON.stringify(this.data, null, 2)); }
+}
+
+// ---------------------------------------------------------------- сессии
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, lang TEXT, lines INT, doc TEXT, purpose TEXT, layer TEXT, error TEXT, code TEXT);
+CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY, file TEXT, name TEXT, kind TEXT, line INT, end_line INT, sig TEXT, route TEXT, doc TEXT, hash TEXT, ord INT);
+CREATE TABLE IF NOT EXISTS edges(src TEXT, dst TEXT);
+CREATE TABLE IF NOT EXISTS expl(id TEXT PRIMARY KEY, phrase TEXT, what TEXT, io TEXT, example TEXT, watch TEXT, hash TEXT, model TEXT, commit_short TEXT, updated TEXT, edited INT DEFAULT 0);
+CREATE TABLE IF NOT EXISTS layers(id TEXT PRIMARY KEY, name TEXT, description TEXT, ord INT);
+CREATE TABLE IF NOT EXISTS terms(term TEXT PRIMARY KEY, definition TEXT);
+CREATE TABLE IF NOT EXISTS usage(ts TEXT, model TEXT, input_tokens INT, output_tokens INT, cost REAL, note TEXT);
+`;
+
+function rows(db, q, params = []) {
+  const st = db.prepare(q);
+  st.bind(params);
+  const out = [];
+  while (st.step()) out.push(st.getAsObject());
+  st.free();
+  return out;
+}
+
+export class Session {
+  constructor(file, db) { this.file = file; this.db = db; this.id = path.basename(file, '.mimis'); }
+
+  meta(key, fallback = null) {
+    const r = rows(this.db, 'SELECT value FROM meta WHERE key=?', [key])[0];
+    return r ? JSON.parse(r.value) : fallback;
+  }
+  setMeta(key, value) { this.db.run('INSERT OR REPLACE INTO meta VALUES (?,?)', [key, JSON.stringify(value)]); }
+
+  /** Записать результат разбора кода. Пояснения, термины и журнал расходов не трогаем. */
+  writeAnalysis(fetched, analysis, layers, layersSource) {
+    const db = this.db;
+    const oldFiles = Object.fromEntries(rows(db, 'SELECT path, purpose, layer FROM files').map((r) => [r.path, r]));
+    db.run('BEGIN');
+    try {
+      db.run('DELETE FROM files'); db.run('DELETE FROM items'); db.run('DELETE FROM edges');
+      if (layers) {
+        db.run('DELETE FROM layers');
+        layers.forEach((l, i) => db.run('INSERT INTO layers VALUES (?,?,?,?)', [l.id, l.name, l.description || '', i]));
+      }
+      const layerOf = {};
+      for (const l of layers || []) for (const f of l.files || []) layerOf[f] = l.id;
+      const known = new Set(rows(db, 'SELECT id FROM layers').map((r) => r.id));
+      let needNew = false;
+      for (const [p, f] of Object.entries(analysis.files)) {
+        let layer = layerOf[p] || oldFiles[p]?.layer;
+        if (!layer || !known.has(layer)) { layer = 'new'; needNew = true; }
+        db.run('INSERT INTO files VALUES (?,?,?,?,?,?,?,?)', [p, f.lang, f.lines, f.doc || '', oldFiles[p]?.purpose || '', layer, f.error, analysis.code[p]]);
+      }
+      if (needNew && !known.has('new')) db.run('INSERT INTO layers VALUES (?,?,?,?)', ['new', 'Новые файлы', 'Появились после последней раскладки по слоям', 999]);
+      analysis.items.forEach((it, i) => db.run('INSERT INTO items VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        [it.id, it.file, it.name, it.kind, it.line, it.end, it.sig, it.route, it.doc, it.hash, i]));
+      for (const [a, b] of analysis.edges) db.run('INSERT INTO edges VALUES (?,?)', [a, b]);
+      db.run("DELETE FROM layers WHERE id NOT IN (SELECT DISTINCT layer FROM files) AND id='new'");
+      db.run('COMMIT');
+    } catch (e) { db.run('ROLLBACK'); throw e; }
+    this.setMeta('source', fetched.source);
+    this.setMeta('commit', fetched.commit);
+    if (layersSource) this.setMeta('layers_source', layersSource);
+    this.setMeta('updated', now());
+  }
+
+  items() {
+    return rows(this.db, 'SELECT id, file, name, kind, line, end_line AS "end", sig, route, doc, hash FROM items ORDER BY ord');
+  }
+  explMap() {
+    return Object.fromEntries(rows(this.db, 'SELECT * FROM expl').map((r) => [r.id, r]));
+  }
+  edges() { return rows(this.db, 'SELECT src, dst FROM edges').map((r) => [r.src, r.dst]); }
+  code(file) { return rows(this.db, 'SELECT code FROM files WHERE path=?', [file])[0]?.code ?? null; }
+
+  status(item, expl) {
+    const e = expl[item.id];
+    return !e ? 'none' : e.hash === item.hash ? 'fresh' : 'stale';
+  }
+
+  /** Всё для интерфейса, кроме исходного кода (его отдаём по файлу). */
+  view() {
+    const expl = this.explMap();
+    const items = this.items().map((it) => ({ ...it, status: this.status(it, expl), phrase: expl[it.id]?.phrase || it.doc || '' }));
+    const counts = { fresh: 0, stale: 0, none: 0 };
+    items.forEach((i) => counts[i.status]++);
+    const ids = new Set(items.map((i) => i.id));
+    return {
+      id: this.id,
+      title: this.meta('title'),
+      source: this.meta('source'),
+      commit: this.meta('commit'),
+      created: this.meta('created'),
+      updated: this.meta('updated'),
+      summary: this.meta('summary', ''),
+      layersSource: this.meta('layers_source', 'folders'),
+      lastUpdate: this.meta('last_update', null),
+      files: rows(this.db, 'SELECT path, lang, lines, doc, purpose, layer, error FROM files ORDER BY path'),
+      layers: rows(this.db, 'SELECT id, name, description FROM layers ORDER BY ord'),
+      items,
+      edges: this.edges(),
+      expl: Object.fromEntries(Object.entries(expl).filter(([k]) => ids.has(k))),
+      orphans: Object.keys(expl).filter((k) => !ids.has(k)),
+      terms: rows(this.db, 'SELECT term, definition FROM terms ORDER BY term'),
+      usage: rows(this.db, 'SELECT COALESCE(SUM(input_tokens),0) AS inTok, COALESCE(SUM(output_tokens),0) AS outTok, COALESCE(SUM(cost),0) AS cost FROM usage')[0],
+      counts: { ...counts, total: items.length },
+    };
+  }
+
+  summaryRow() {
+    const total = rows(this.db, 'SELECT COUNT(*) AS n FROM items')[0].n;
+    const fresh = rows(this.db, 'SELECT COUNT(*) AS n FROM items i JOIN expl e ON e.id=i.id AND e.hash=i.hash')[0].n;
+    const files = rows(this.db, 'SELECT COUNT(*) AS n FROM files')[0].n;
+    return { id: this.id, title: this.meta('title'), source: this.meta('source'), commit: this.meta('commit'), updated: this.meta('updated'), total, fresh, files };
+  }
+
+  saveExplanation(id, entry, { model = '', edited = false } = {}) {
+    const it = rows(this.db, 'SELECT hash FROM items WHERE id=?', [id])[0];
+    if (!it) throw new Error('Такой функции нет в текущем коде');
+    const c = this.meta('commit') || {};
+    this.db.run('INSERT OR REPLACE INTO expl VALUES (?,?,?,?,?,?,?,?,?,?,?)', [
+      id, entry.phrase || '', entry.what || '', entry.io || '', entry.example || '', entry.watch || '',
+      it.hash, model, c.short || '', now(), edited ? 1 : 0,
+    ]);
+  }
+  confirmExplanation(id) {
+    const it = rows(this.db, 'SELECT hash FROM items WHERE id=?', [id])[0];
+    if (!it) throw new Error('Такой функции нет в текущем коде');
+    this.db.run('UPDATE expl SET hash=?, commit_short=?, updated=? WHERE id=?', [it.hash, this.meta('commit')?.short || '', now(), id]);
+  }
+  deleteExplanation(id) { this.db.run('DELETE FROM expl WHERE id=?', [id]); }
+  setPurpose(file, purpose) { this.db.run('UPDATE files SET purpose=? WHERE path=?', [purpose, file]); }
+  addTerms(terms) {
+    for (const t of terms || []) {
+      if (t?.term && t?.definition) this.db.run('INSERT OR IGNORE INTO terms VALUES (?,?)', [String(t.term).slice(0, 80), String(t.definition).slice(0, 600)]);
+    }
+  }
+  setLayers(layers) {
+    const db = this.db;
+    db.run('BEGIN');
+    try {
+      db.run('DELETE FROM layers');
+      layers.forEach((l, i) => db.run('INSERT INTO layers VALUES (?,?,?,?)', [l.id, l.name, l.description || '', i]));
+      for (const l of layers) for (const f of l.files) db.run('UPDATE files SET layer=? WHERE path=?', [l.id, f]);
+      db.run('COMMIT');
+    } catch (e) { db.run('ROLLBACK'); throw e; }
+    this.setMeta('layers_source', 'ai');
+  }
+  logUsage(model, inTok, outTok, cost, note) {
+    this.db.run('INSERT INTO usage VALUES (?,?,?,?,?,?)', [now(), model, inTok, outTok, cost, note]);
+  }
+
+  save() {
+    atomicWrite(this.file, Buffer.from(this.db.export()));
+  }
+}
+
+export class Sessions {
+  constructor(dir) {
+    this.dir = path.join(dir, 'sessions');
+    fs.mkdirSync(this.dir, { recursive: true });
+    // файлы первой версии (*.magistr) — переименовываем
+    for (const f of fs.readdirSync(this.dir).filter((n) => n.endsWith('.magistr'))) {
+      try { fs.renameSync(path.join(this.dir, f), path.join(this.dir, f.replace(/\.magistr$/, '.mimis'))); } catch { /* */ }
+    }
+    this.open = new Map();
+  }
+  fileOf(id) {
+    if (!/^[\w-]+$/.test(id)) throw new Error('Некорректный идентификатор сессии');
+    return path.join(this.dir, `${id}.mimis`);
+  }
+  async create(title) {
+    const SQLc = await sql();
+    const slug = (title || 'repo').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'repo';
+    const id = `${slug}-${crypto.randomBytes(3).toString('hex')}`;
+    const db = new SQLc.Database();
+    db.run(SCHEMA);
+    const s = new Session(this.fileOf(id), db);
+    s.setMeta('version', 1);
+    s.setMeta('title', title);
+    s.setMeta('created', now());
+    this.open.set(id, s);
+    return s;
+  }
+  async get(id) {
+    if (this.open.has(id)) return this.open.get(id);
+    const file = this.fileOf(id);
+    if (!fs.existsSync(file)) throw new Error('Сессия не найдена');
+    const SQLc = await sql();
+    const db = new SQLc.Database(fs.readFileSync(file));
+    db.run(SCHEMA);
+    const s = new Session(file, db);
+    this.open.set(id, s);
+    return s;
+  }
+  async list() {
+    const out = [];
+    for (const f of fs.readdirSync(this.dir).filter((n) => n.endsWith('.mimis'))) {
+      try { out.push((await this.get(path.basename(f, '.mimis'))).summaryRow()); } catch { /* битый файл — пропускаем */ }
+    }
+    return out.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
+  }
+  remove(id) {
+    const s = this.open.get(id);
+    if (s) { s.db.close(); this.open.delete(id); }
+    fs.rmSync(this.fileOf(id), { force: true });
+  }
+}

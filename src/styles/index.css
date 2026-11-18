@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+body { overflow: hidden; }
+
+.scroll-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+.scroll-thin::-webkit-scrollbar-thumb { background: theme('colors.hairline'); border-radius: 4px; }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+
+:focus-visible { outline: 2px solid theme('colors.bronze'); outline-offset: 2px; }
+
+.label-mono { @apply font-mono text-[10px] uppercase tracking-wide text-mist; }
+.input { @apply w-full bg-panel-2 border border-hairline rounded-lg px-3 py-2.5 text-stone text-sm outline-none placeholder:text-mist-dim focus:border-bronze transition-colors; }
+.btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-[13px] font-medium border border-hairline text-stone hover:bg-panel-2 transition-colors disabled:opacity-40 disabled:cursor-default; }
+.btn-bronze { @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-[13.5px] font-semibold bg-bronze text-[#1A1409] hover:brightness-110 transition-[filter] disabled:opacity-40 disabled:cursor-default; }
+.btn-ghost { @apply inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] text-mist hover:text-stone hover:bg-panel-2 transition-colors; }
+.card { @apply bg-panel border border-hairline rounded-2xl; }
+
+/* подсветка кода — в палитре Мимира */
+.code-view { font-family: theme('fontFamily.mono'); font-size: 12.5px; line-height: 1.65; font-variant-ligatures: none; font-feature-settings: 'liga' 0, 'calt' 0; }
+.code-view .ln { color: theme('colors.mist-dim'); user-select: none; text-align: right; padding: 0 14px 0 10px; }
+.code-view tr.hl { background: rgba(185,141,85,0.09); }
+.code-view tr.hl .ln { color: theme('colors.bronze'); }
+.code-view tr.focus { background: rgba(185,141,85,0.22); }
+.hljs-keyword, .hljs-built_in, .hljs-literal { color: #B98D55; }
+.hljs-string, .hljs-regexp { color: #8FB59A; }
+.hljs-number { color: #C9A7D9; }
+.hljs-comment, .hljs-quote { color: #5C6660; font-style: italic; }
+.hljs-title, .hljs-title.function_, .hljs-title.class_ { color: #7FA8CF; }
+.hljs-params, .hljs-variable { color: #D6D9DD; }
+.hljs-meta, .hljs-decorator { color: #D98787; }
+.hljs-attr, .hljs-attribute, .hljs-property { color: #A9C2D8; }
+.hljs-tag, .hljs-name { color: #7FA08A; }
+.hljs-type { color: #7FA8CF; }
