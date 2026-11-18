@@ -123,7 +123,7 @@ core/                  ядро без Electron (его проверяют те�
   explain.js           конвейер пояснений: план, оценка, пачки по файлам, лимит, обзор
   store.js             настройки (settings.json) и разборы (*.mimis — база SQLite)
   core.js              всё вместе: этим пользуются окно и тесты
-src/                   интерфейс: React + Redux Toolkit + Tailwind (дизайн — из заготовок Мимира);
+src/                   интерфейс: React + Redux Toolkit + Tailwind;
                        схемы — src/components/Graph.jsx (раскладка elkjs) и src/features/session/Diagrams.jsx
 tests/                 core.test.mjs — проверка ядра; fake-llm.mjs — поддельная модель;
                        fixtures/ — учебные проекты на Python и JS, на которых идёт проверка

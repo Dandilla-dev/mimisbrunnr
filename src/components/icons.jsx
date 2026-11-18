@@ -1,4 +1,4 @@
-// Иконки в манере заготовок Мимира: 24×24, линия цветом текста, без заливки.
+// Иконки: 24×24, линия цветом текста, без заливки.
 const base = { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 1.6 };
 
 export const ScrollIcon = (p) => (
