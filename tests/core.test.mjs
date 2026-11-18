@@ -1,27 +1,41 @@
-// Проверка ядра без Electron, сети и настоящего ИИ:
-// поддельный GitHub (zip-архив) и поддельная модель (форматы Anthropic и OpenAI).
-// Запуск: npm test  (MIMIS_TEST_BACK / MIMIS_TEST_FRONT — пути к репозиториям)
+// Проверка ядра без Electron, сети и настоящего ИИ.
+// Разбираются два маленьких учебных проекта из tests/fixtures:
+//   py_app — магазин на Python (классы, методы, импорты, Depends);
+//   js_app — корзина на React + Express (компоненты, хуки, createSlice, маршруты, require).
+// GitHub и модель подделаны (форматы Anthropic и OpenAI). Запуск: npm test
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { zipSync, strToU8 } from 'fflate';
 import { MimisCore } from '../core/core.js';
 
-const BACK = process.env.MIMIS_TEST_BACK || '/tmp/mimir_back';
-const FRONT = process.env.MIMIS_TEST_FRONT || '/tmp/mimir';
+const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+const PY = path.join(FIX, 'py_app');
+const JS = path.join(FIX, 'js_app');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mimis-test-'));
 let ok = 0;
 const step = (m) => { ok += 1; console.log(`  ✓ ${m}`); };
 
-// ---- поддельный GitHub ----
-const zipFile = path.join(tmp, 'front.zip');
-execFileSync('git', ['-C', FRONT, 'archive', '--format=zip', '--prefix=mimir-abc123/', '-o', zipFile, 'HEAD']);
+// ---- поддельный GitHub: отдаёт js_app zip-архивом, как codeload ----
+function zipFolder(dir, prefix) {
+  const entries = {};
+  (function walk(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else entries[`${prefix}/${path.relative(dir, full).split(path.sep).join('/')}`] = strToU8(fs.readFileSync(full, 'utf8'));
+    }
+  })(dir);
+  return Buffer.from(zipSync(entries));
+}
+const zipData = zipFolder(JS, 'example-js_app-abc1234');
 const gh = http.createServer((req, res) => {
-  if (req.url === '/repos/Dandilla-dev/mimir') return res.end(JSON.stringify({ default_branch: 'master' }));
-  if (req.url.startsWith('/repos/Dandilla-dev/mimir/commits/')) return res.end(JSON.stringify({ sha: 'abc1234567890', commit: { message: 'Тестовый коммит\n\nтело', committer: { date: '2026-11-18T10:00:00Z' } } }));
-  if (req.url.startsWith('/Dandilla-dev/mimir/zip/')) return res.end(fs.readFileSync(zipFile));
+  if (req.url === '/repos/example/js_app') return res.end(JSON.stringify({ default_branch: 'main' }));
+  if (req.url.startsWith('/repos/example/js_app/commits/')) return res.end(JSON.stringify({ sha: 'abc1234567890', commit: { message: 'Тестовый коммит\n\nтело', committer: { date: '2026-11-18T10:00:00Z' } } }));
+  if (req.url.startsWith('/example/js_app/zip/')) return res.end(zipData);
   res.statusCode = 404; res.end('{}');
 });
 
@@ -75,21 +89,53 @@ try {
   assert.equal(core.state().settings.name, 'Данила');
   step('настройки сохраняются');
 
+  const hasEdge = (sess, a, b) => sess.edges.some(([x, y]) => x === a && y === b);
+  const kindOf = (sess, id) => sess.items.find((i) => i.id === id)?.kind;
+
   // 1. локальная папка, Python
-  const back = await core.createSession(BACK);
-  assert.ok(back.items.length > 400, `функций ${back.items.length}`);
-  assert.ok(back.edges.length > 600, `связей ${back.edges.length}`);
-  assert.ok(back.items.find((i) => i.id === 'core/dlp_heuristics.py::classify'));
+  const back = await core.createSession(PY);
+  for (const [id, kind] of [
+    ['app/db.py::Database', 'class'], ['app/db.py::Database.transaction', 'method'], ['app/db.py::get_db', 'function'],
+    ['app/services/orders.py::OrderService.create', 'method'], ['app/api/routes.py::create_order', 'function'],
+    ['app/rules.py::classify', 'function'],
+  ]) assert.equal(kindOf(back, id), kind, id);
+  for (const [a, b] of [
+    ['app/db.py::Database.query', 'app/db.py::Database.connect'], // self.method()
+    ['app/services/pricing.py::apply_discount', 'app/services/pricing.py::_rate'], // вызов в том же файле
+    ['app/services/orders.py::OrderService.create', 'app/services/pricing.py::apply_discount'], // относительный импорт
+    ['app/services/orders.py::OrderService.create', 'app/services/orders.py::OrderService._validate'],
+    ['app/services/orders.py::OrderService.create', 'app/db.py::Database.insert'], // self.repo: Database
+    ['app/services/orders.py::OrderService.create', 'app/models.py::Order'], // создание объекта
+    ['app/api/routes.py::create_order', 'app/db.py::get_db'], // Depends(get_db)
+    ['app/api/routes.py::create_order', 'app/services/orders.py::OrderService'],
+  ]) assert.ok(hasEdge(back, a, b), `${a} → ${b}`);
   assert.equal(back.counts.none, back.counts.total);
   step(`папка (Python): ${back.files.length} файлов, ${back.items.length} функций, ${back.edges.length} связей, слои: ${back.layers.map((l) => l.name).join(', ')}`);
 
-  // 2. GitHub через zip, JS/React
-  const front = await core.createSession('https://github.com/Dandilla-dev/mimir');
+  // 2. GitHub через zip, JS/React/Express
+  const front = await core.createSession('https://github.com/example/js_app');
   assert.equal(front.commit.short, 'abc1234');
-  assert.ok(front.items.some((i) => i.kind === 'component'));
+  for (const [id, kind] of [
+    ['src/App.jsx::App', 'component'], ['src/components/Layout.jsx::Layout', 'component'], // memo(...)
+    ['src/features/cart/CartItem.jsx::CartItem', 'component'], // стрелочная функция
+    ['src/features/cart/useCart.js::useCart', 'hook'],
+    ['src/features/cart/CartPage.jsx::CartPage.handleRemove', 'function'], // обработчик внутри компонента
+    ['src/features/cart/cartSlice.js::cartSlice.removeItem', 'method'], // редьюсер createSlice
+    ['src/legacy/Counter.js::Counter.increment', 'method'],
+    ['src/utils/format.ts::formatPrice', 'function'], // TypeScript
+    ['server/index.js::GET /api/orders/:customer', 'route'], // Express
+    ['server/orders.js::countOrders', 'function'], // exports.*
+  ]) assert.equal(kindOf(front, id), kind, id);
+  for (const [a, b] of [
+    ['src/App.jsx::App', 'src/features/cart/CartPage.jsx::CartPage'], // JSX
+    ['src/features/cart/CartPage.jsx::CartPage', 'src/features/cart/CartItem.jsx::CartItem'], // JSX внутри map
+    ['src/features/cart/CartPage.jsx::CartPage', 'src/features/cart/useCart.js::useCart'],
+    ['src/features/cart/useCart.js::useCart', 'src/utils/format.ts::formatPrice'], // импорт .ts без расширения
+    ['server/index.js::GET /api/orders/:customer', 'server/orders.js::listOrders'], // require + module.exports
+  ]) assert.ok(hasEdge(front, a, b), `${a} → ${b}`);
   step(`GitHub (JS/React): ${front.files.length} файлов, ${front.items.length} позиций, коммит ${front.commit.short} «${front.commit.subject}»`);
   const code = await core.code(front.id, 'src/App.jsx');
-  assert.ok(code.includes('export default function App'));
+  assert.equal(code, fs.readFileSync(path.join(JS, 'src/App.jsx'), 'utf8'));
   step('код файла хранится в сессии и отдаётся целиком');
 
   // 3. оценка и бюджет (OpenAI-совместимый)
@@ -120,33 +166,36 @@ try {
 
   // 4. формат Anthropic, одна функция
   core.updateSettings({ provider: { type: 'anthropic', baseUrl: `http://127.0.0.1:${llmPort}`, model: 'fake-claude', priceIn: 2, priceOut: 10 }, apiKey: 'test-key' });
-  r = await (await core.startExplain(back.id, { kind: 'item', id: 'core/dlp_heuristics.py::classify' })).promise;
+  r = await (await core.startExplain(back.id, { kind: 'item', id: 'app/rules.py::classify' })).promise;
   v = await core.view(back.id);
-  assert.equal(v.expl['core/dlp_heuristics.py::classify'].what, 'Что делает classify.');
+  assert.equal(v.expl['app/rules.py::classify'].what, 'Что делает classify.');
   step('формат Anthropic: пояснение одной функции');
   const t = await core.testConnection();
   assert.equal(t.reply, 'Готов');
   step('проверка подключения к модели');
 
   // 5. ручная правка
-  v = await core.saveExplanation(back.id, 'core/db.py::transaction', { phrase: 'ф', what: 'Вручную', io: '', example: '', watch: '' });
-  assert.equal(v.items.find((i) => i.id === 'core/db.py::transaction').status, 'fresh');
+  v = await core.saveExplanation(back.id, 'app/db.py::Database.transaction', { phrase: 'ф', what: 'Вручную', io: '', example: '', watch: '' });
+  assert.equal(v.items.find((i) => i.id === 'app/db.py::Database.transaction').status, 'fresh');
   step('ручная правка пояснения');
 
   // 6. обновление: изменённая, новая и удалённая функции
-  const copy = path.join(tmp, 'back-copy');
-  fs.cpSync(BACK, copy, { recursive: true, filter: (p) => !p.includes(`${path.sep}.git`) });
+  const copy = path.join(tmp, 'py-copy');
+  fs.cpSync(PY, copy, { recursive: true });
   const s2 = await core.createSession(copy);
-  await (await core.startExplain(s2.id, { kind: 'file', file: 'core/dlp_heuristics.py' })).promise;
-  const f = path.join(copy, 'core/dlp_heuristics.py');
-  fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('if threat_reasons:\n        level = ThreatLevel.THREAT', 'if threat_reasons and event:\n        level = ThreatLevel.THREAT')
-    .replace('def _rule_domain_watchlisted(', 'def _rule_watchlisted_domain(') + '\n\ndef new_helper(x):\n    return x\n');
+  await (await core.startExplain(s2.id, { kind: 'file', file: 'app/rules.py' })).promise;
+  const f = path.join(copy, 'app/rules.py');
+  const src = fs.readFileSync(f, 'utf8');
+  const changed = src.replace('elif sum(weak) >= 2:', 'elif sum(weak) >= 1:').replaceAll('_rule_night_time', '_rule_late_hour')
+    + '\n\ndef new_helper(x):\n    return x\n';
+  assert.notEqual(changed, src);
+  fs.writeFileSync(f, changed);
   v = await core.updateSession(s2.id);
   const st = (id) => v.items.find((i) => i.id === id)?.status;
-  assert.equal(st('core/dlp_heuristics.py::classify'), 'stale');
-  assert.equal(st('core/dlp_heuristics.py::new_helper'), 'none');
-  assert.equal(st('core/dlp_heuristics.py::_rule_executable_content'), 'fresh');
-  assert.ok(v.orphans.includes('core/dlp_heuristics.py::_rule_domain_watchlisted'));
+  assert.equal(st('app/rules.py::classify'), 'stale');
+  assert.equal(st('app/rules.py::new_helper'), 'none');
+  assert.equal(st('app/rules.py::_rule_big_amount'), 'fresh');
+  assert.ok(v.orphans.includes('app/rules.py::_rule_night_time'));
   step(`обновление: изменено ${v.lastUpdate.changed}, новых ${v.lastUpdate.added}, удалено ${v.lastUpdate.removed}; устаревшие и новые помечены`);
 
   // 7. сессии переживают перезапуск

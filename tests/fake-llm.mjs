@@ -12,7 +12,7 @@ http.createServer((req, res) => {
       const files = [...user.matchAll(/^- (\S+) \(/gm)].map((m) => m[1]);
       const ui = files.filter((f) => /components|features|App|main/.test(f));
       const rest = files.filter((f) => !ui.includes(f));
-      answer = { summary: 'Это веб-интерфейс мессенджера Мимир на React: экраны входа, чата, профиля и настроек, общий магазин состояния Redux и декоративные компоненты в северном стиле.', layers: [{ name: 'Экраны и компоненты', description: 'То, что видит пользователь: экраны и их части.', files: ui }, { name: 'Состояние и настройка', description: 'Хранилище Redux, срезы и конфигурация сборки.', files: rest }] };
+      answer = { summary: 'Обзор проекта от поддельной модели: здесь был бы рассказ о том, из каких частей состоит код и как они связаны.', layers: [{ name: 'Экраны и компоненты', description: 'То, что видит пользователь: экраны и их части.', files: ui }, { name: 'Состояние и настройка', description: 'Хранилище Redux, срезы и конфигурация сборки.', files: rest }] };
     } else if (user.includes('одним словом')) answer = null;
     else {
       const names = [...user.matchAll(/^- (.+?) \((?:функция|метод|класс|React-компонент|React-хук|маршрут),/gm)].map((m) => m[1]);
