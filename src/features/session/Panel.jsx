@@ -4,43 +4,31 @@ import { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { go, back, home, reloadSession, toast } from '../../app/store';
 import CodeView from '../../components/CodeView';
-import { BackIcon, SparkIcon, CodeIcon } from '../../components/icons';
+import { BackIcon, SparkIcon, CodeIcon, PathIcon } from '../../components/icons';
+import { ScenarioList, ScenarioView } from './Scenarios';
+import { useCode } from './useCode';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
 import { ProjectDiagram, LayerDiagram, FnDiagram } from './Diagrams';
 
-// ---- код файла: грузим из главного процесса, держим в памяти ----
-const codeCache = new Map();
-function useCode(view, file) {
-  const key = `${view.id}:${view.commit?.hash}:${file}`;
-  const [code, setCode] = useState(codeCache.get(key) ?? null);
-  useEffect(() => {
-    let alive = true;
-    if (codeCache.has(key)) { setCode(codeCache.get(key)); return undefined; }
-    setCode(null);
-    window.mimis.code(view.id, file).then((c) => { codeCache.set(key, c || ''); if (alive) setCode(c || ''); });
-    return () => { alive = false; };
-  }, [key, view.id, file]);
-  return code;
-}
-
-const Badge = ({ status }) => status === 'fresh'
+export const Badge = ({ status }) => status === 'fresh'
   ? <span className="font-mono text-[10px] text-moss">● разбор</span>
   : status === 'stale'
     ? <span className="font-mono text-[10px] text-bronze">⚠ код изменился</span>
     : <span className="font-mono text-[10px] text-mist-dim">○ нет пояснения</span>;
 
-const KindTag = ({ kind }) => (
+export const KindTag = ({ kind }) => (
   <span className="font-mono text-[9.5px] uppercase tracking-wide text-mist-dim border border-hairline rounded px-1.5 py-[1px]">{KIND_RU[kind] || kind}</span>
 );
 
-function FnLink({ ix, id }) {
+function FnLink({ ix, id, passed }) {
   const dispatch = useDispatch();
   const it = ix.itemById[id];
   if (!it) return null;
   return (
-    <button onClick={() => dispatch(go({ t: 'fn', id }))} className="font-mono text-[12px] px-2 py-1 rounded-md border border-hairline bg-panel-2 hover:border-bronze hover:text-bronze transition-colors text-left">
-      {it.name}<span className="text-mist-dim"> · {it.file.split('/').pop()}</span>
+    <button onClick={() => dispatch(go({ t: 'fn', id }))} className={`font-mono text-[12px] px-2 py-1 rounded-md border bg-panel-2 hover:border-bronze hover:text-bronze transition-colors text-left ${passed ? 'border-dashed border-mist-dim' : 'border-hairline'}`}
+      title={passed ? 'Не вызывается напрямую, а передаётся (в onClick, аргументом, в список) — вызовется позже' : undefined}>
+      {it.name}<span className="text-mist-dim"> · {it.file.split('/').pop()}{passed ? ' · передаётся' : ''}</span>
     </button>
   );
 }
@@ -61,6 +49,8 @@ function Crumbs({ view, ix }) {
     const lay = ix.fileByPath[it.file]?.layer;
     add(layerName(lay), { t: 'layer', id: lay }); add(it.file, { t: 'file', file: it.file }); add(it.name);
   }
+  if (top.t === 'scenarios') add('Сценарии');
+  if (top.t === 'scenario') { add('Сценарии', { t: 'scenarios' }); add(ix.itemById[top.id]?.name || ''); }
   if (top.t === 'todo') add('Требует внимания');
   if (top.t === 'terms') add('Словарь');
   return (
@@ -258,7 +248,7 @@ function FnView({ view, ix, id, onExplain }) {
     dispatch(toast('Пояснение отмечено как актуальное'));
   }
 
-  const links = (arr) => (arr.length ? <div className="flex flex-wrap gap-1.5">{arr.map((x) => <FnLink key={x} ix={ix} id={x} />)}</div> : <div className="text-[13px] text-mist-dim">Нет в коде проекта.</div>);
+  const links = (arr, kindOf) => (arr.length ? <div className="flex flex-wrap gap-1.5">{arr.map((x) => <FnLink key={x} ix={ix} id={x} passed={kindOf(x) === 'ref'} />)}</div> : <div className="text-[13px] text-mist-dim">Нет в коде проекта.</div>);
 
   return (
     <div>
@@ -305,8 +295,11 @@ function FnView({ view, ix, id, onExplain }) {
               {expl && <Sec n="2" title="Что на входе и что на выходе"><p className="text-[14px] leading-relaxed">{expl.io}</p></Sec>}
               <Sec n="3" title="Связи">
                 <FnDiagram view={view} ix={ix} id={id} />
-                <div className="text-[12px] text-mist mb-1.5 mt-4">Кто вызывает</div>{links(callers)}
-                <div className="text-[12px] text-mist mb-1.5 mt-3">Кого вызывает</div>{links(calls)}
+                <div className="text-[12px] text-mist mb-1.5 mt-4">Кто вызывает</div>{links(callers, (x) => ix.edgeKind[`${x}>${id}`])}
+                <div className="text-[12px] text-mist mb-1.5 mt-3">Кого вызывает</div>{links(calls, (x) => ix.edgeKind[`${id}>${x}`])}
+                {calls.length > 0 && (
+                  <button className="btn mt-4" onClick={() => dispatch(go({ t: 'scenario', id }))}><PathIcon className="w-4 h-4" />Пройти сценарий отсюда</button>
+                )}
               </Sec>
               {expl && <Sec n="4" title="Пример"><div className="text-[13.5px] leading-relaxed bg-panel-2 border border-hairline-soft rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.example}</div></Sec>}
               {expl && <Sec n="5" title="На что обратить внимание"><div className="text-[13.5px] leading-relaxed bg-bronze-dim border border-bronze/25 rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.watch}</div></Sec>}
@@ -371,6 +364,8 @@ export default function Panel({ view, ix, onExplain }) {
   if (top.t === 'layer') body = <LayerView view={view} ix={ix} id={top.id} />;
   else if (top.t === 'file' && ix.fileByPath[top.file]) body = <FileView key={top.file} view={view} ix={ix} file={top.file} onExplain={onExplain} />;
   else if (top.t === 'fn' && ix.itemById[top.id]) body = <FnView view={view} ix={ix} id={top.id} onExplain={onExplain} />;
+  else if (top.t === 'scenarios') body = <ScenarioList view={view} ix={ix} />;
+  else if (top.t === 'scenario' && ix.itemById[top.id]) body = <ScenarioView key={top.id} view={view} ix={ix} id={top.id} />;
   else if (top.t === 'todo') body = <Todo view={view} ix={ix} />;
   else if (top.t === 'terms') body = <Terms view={view} />;
   else body = <Overview view={view} ix={ix} onExplain={onExplain} />;

@@ -14,7 +14,7 @@ class Item:
 @dataclass
 class Order:
     customer: str
-    items: list = field(default_factory=list)
+    items: list[Item] = field(default_factory=list)
 
     def total(self):
         return sum(i.subtotal() for i in self.items)

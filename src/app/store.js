@@ -23,6 +23,10 @@ export const updateSession = createAsyncThunk('session/update', async (id, { dis
   dispatch(refreshSessions());
   return view;
 });
+export const runStory = createAsyncThunk('session/story', async ({ id, entry, depth }) => {
+  const r = await api().runStory(id, entry, depth);
+  return { ...r.view, storyResult: r.result };
+});
 export const deleteSession = createAsyncThunk('session/delete', async (id, { dispatch }) => {
   await api().deleteSession(id);
   dispatch(refreshSessions());
@@ -81,12 +85,13 @@ const sessionSlice = createSlice({
       const ids = new Set(a.payload.items.map((i) => i.id));
       const files = new Set(a.payload.files.map((f) => f.path));
       const layers = new Set(a.payload.layers.map((l) => l.id));
-      s.stack = s.stack.filter((v) => (v.t !== 'fn' || ids.has(v.id)) && (v.t !== 'file' || files.has(v.file)) && (v.t !== 'layer' || layers.has(v.id)));
+      s.stack = s.stack.filter((v) => (!['fn', 'scenario'].includes(v.t) || ids.has(v.id)) && (v.t !== 'file' || files.has(v.file)) && (v.t !== 'layer' || layers.has(v.id)));
       if (!s.stack.length) s.stack = [{ t: 'overview' }];
     };
     b.addCase(createSession.fulfilled, setView);
     b.addCase(openSession.fulfilled, setView);
     b.addCase(reloadSession.fulfilled, setView);
+    b.addCase(runStory.fulfilled, setView);
     b.addCase(updateSession.fulfilled, (s, a) => { setView(s, a); s.lastUpdate = a.payload.lastUpdate; });
     b.addCase(deleteSession.fulfilled, (s) => { s.view = null; });
   },

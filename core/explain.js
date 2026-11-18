@@ -146,7 +146,8 @@ export async function runExplain(ctx, scope) {
   const p = plan(view, getCode, scope, provider);
   const budget = Number(scope.budgetUsd ?? ctx.settings.data.budgetUsd) || 0;
   const callers = {}, callees = {};
-  for (const [a, b] of view.edges) { (callees[a] ||= []).push(b); (callers[b] ||= []).push(a); }
+  // функции, которые передаются (onClick={f}, аргументом), помечаем — модель не спутает с прямым вызовом
+  for (const [a, b, k] of view.edges) { (callees[a] ||= []).push(k === 'ref' ? `${b} (передаётся)` : b); (callers[b] ||= []).push(k === 'ref' ? `${a} (передаёт)` : a); }
   const itemById = Object.fromEntries(view.items.map((i) => [i.id, i]));
 
   const st = { done: 0, total: p.count, spent: 0, inTok: 0, outTok: 0, file: '', log: [], status: 'running', errors: 0 };

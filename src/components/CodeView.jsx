@@ -33,9 +33,10 @@ function splitLines(html) {
 
 /**
  * code — текст; from/to — какие строки файла показать (по умолчанию все);
- * mark — [начало, конец] подсвеченного диапазона; focus — строка, к которой прокрутить.
+ * mark — [начало, конец] подсвеченного диапазона; focus — строка, к которой прокрутить;
+ * points — отдельные строки, отмеченные точкой слева (места вызовов в сценарии).
  */
-export default function CodeView({ code, lang, from = 1, to, mark, focus, maxHeight = '60vh' }) {
+export default function CodeView({ code, lang, from = 1, to, mark, focus, points, maxHeight = '60vh' }) {
   const ref = useRef(null);
   const lines = useMemo(() => {
     const all = code.split('\n');
@@ -65,7 +66,7 @@ export default function CodeView({ code, lang, from = 1, to, mark, focus, maxHei
             const n = from + i;
             const inMark = mark && n >= mark[0] && n <= mark[1];
             return (
-              <tr key={n} data-line={n} className={n === focus ? 'focus' : inMark ? 'hl' : ''}>
+              <tr key={n} data-line={n} className={`${n === focus ? 'focus' : inMark ? 'hl' : ''} ${points?.has(n) ? 'pt' : ''}`}>
                 <td className="ln align-top">{n}</td>
                 {/* html — вывод highlight.js: исходный код в нём уже экранирован */}
                 <td className="pr-4 whitespace-pre text-stone" dangerouslySetInnerHTML={{ __html: html || ' ' }} />

@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { zipSync, strToU8 } from 'fflate';
 import { MimisCore } from '../core/core.js';
+import { buildScenario, entryPoints } from '../core/scenario.js';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const PY = path.join(FIX, 'py_app');
@@ -55,6 +56,9 @@ const llm = http.createServer((req, res) => {
       answer = { file_purposes: Object.fromEntries(bare.map((f) => [f, 'Назначение из обзора.'])), summary: 'Тестовый обзор.', layers: [{ name: 'Первая половина', description: 'Тест', files: files.slice(0, Math.ceil(files.length / 2)) }, { name: 'Вторая половина', description: 'Тест', files: files.slice(Math.ceil(files.length / 2)) }] };
     } else if (user.includes('одним словом')) {
       answer = null;
+    } else if (user.includes('Разбираем сценарий')) {
+      const ns = [...user.matchAll(/^\s*(\d+)\. /gm)].map((m) => Number(m[1]));
+      answer = { title: 'Тестовый сценарий', summary: 'Сводка сценария.', steps: ns.map((n) => ({ n, text: `Шаг ${n}.` })) };
     } else {
       const names = [...user.matchAll(/^- (.+?) \((?:функция|метод|класс|React-компонент|React-хук|маршрут),/gm)].map((m) => m[1]);
       answer = {
@@ -108,7 +112,19 @@ try {
     ['app/services/orders.py::OrderService.create', 'app/models.py::Order'], // создание объекта
     ['app/api/routes.py::create_order', 'app/db.py::get_db'], // Depends(get_db)
     ['app/api/routes.py::create_order', 'app/services/orders.py::OrderService'],
+    // тип из результата другой функции: session = memory.get(...); session.add(...)
+    ['app/sessions.py::remember_line', 'app/sessions.py::SessionStore.get'],
+    ['app/sessions.py::remember_line', 'app/sessions.py::Session.add'],
+    ['app/api/routes.py::create_order', 'app/services/orders.py::OrderService.create'], // service = OrderService(...)
+    ['app/models.py::Order.total', 'app/models.py::Item.subtotal'], // for i in self.items, items: list[Item]
   ]) assert.ok(hasEdge(back, a, b), `${a} → ${b}`);
+  const kindOfEdge = (sess, a, b) => sess.edges.find(([x, y]) => x === a && y === b)?.[2];
+  assert.equal(kindOfEdge(back, 'app/rules.py::classify', 'app/rules.py::_rule_night_time'), 'ref'); // передаётся в кортеже
+  assert.equal(kindOfEdge(back, 'app/rules.py::classify', 'app/rules.py::_rule_big_amount'), 'call');
+  const site = (sess, a, b) => sess.sites.find(([x, y]) => x === a && y === b);
+  assert.equal(site(back, 'app/services/orders.py::OrderService.create', 'app/db.py::Database.insert')[4], 'with self.repo.transaction():');
+  assert.equal(site(back, 'app/db.py::Database.query', 'app/db.py::Database.connect')[4], 'if not self.connected:');
+  step('Python: тип из результата функции, связи «передаётся», места вызовов с условиями');
   assert.equal(back.counts.none, back.counts.total);
   step(`папка (Python): ${back.files.length} файлов, ${back.items.length} функций, ${back.edges.length} связей, слои: ${back.layers.map((l) => l.name).join(', ')}`);
 
@@ -132,7 +148,11 @@ try {
     ['src/features/cart/CartPage.jsx::CartPage', 'src/features/cart/useCart.js::useCart'],
     ['src/features/cart/useCart.js::useCart', 'src/utils/format.ts::formatPrice'], // импорт .ts без расширения
     ['server/index.js::GET /api/orders/:customer', 'server/orders.js::listOrders'], // require + module.exports
+    ['src/api/orders.ts::loadOrders', 'src/api/client.ts::ApiClient.get'], // client = makeClient(): ApiClient
+    ['src/features/cart/useCart.js::useCart.remove', 'src/features/cart/cartSlice.js::cartSlice.removeItem'], // export const { removeItem } = slice.actions
   ]) assert.ok(hasEdge(front, a, b), `${a} → ${b}`);
+  assert.equal(front.edges.find(([x, y]) => x === 'src/features/cart/CartPage.jsx::CartPage' && y === 'src/features/cart/CartPage.jsx::CartPage.handleRemove')?.[2], 'ref'); // onRemove={handleRemove}
+  step('JS/TS: тип из результата функции, действия createSlice, обработчик в JSX — «передаётся»');
   step(`GitHub (JS/React): ${front.files.length} файлов, ${front.items.length} позиций, коммит ${front.commit.short} «${front.commit.subject}»`);
   const code = await core.code(front.id, 'src/App.jsx');
   assert.equal(code, fs.readFileSync(path.join(JS, 'src/App.jsx'), 'utf8'));
@@ -179,7 +199,26 @@ try {
   assert.equal(v.items.find((i) => i.id === 'app/db.py::Database.transaction').status, 'fresh');
   step('ручная правка пояснения');
 
-  // 6. обновление: изменённая, новая и удалённая функции
+  // 6. сценарии: цепочка из кода и рассказ ИИ
+  v = await core.view(back.id);
+  const groups = entryPoints(v);
+  assert.ok(groups.find((g) => g.title === 'Маршруты API').ids.includes('app/api/routes.py::create_order'));
+  const sc = buildScenario(v, 'app/api/routes.py::create_order', { depth: 4 });
+  const order = sc.steps.map((x) => x.id.split('::')[1]);
+  assert.deepEqual(order.slice(0, 4), ['create_order', 'get_db', 'Database.connect', 'OrderService']);
+  assert.ok(order.indexOf('OrderService.create') < order.indexOf('Database.insert'));
+  assert.equal(sc.steps.find((x) => x.id === 'app/db.py::Database.insert').ctx, 'with self.repo.transaction():');
+  step(`сценарий: ${sc.steps.length} шагов от create_order, порядок как в коде`);
+  const se = await core.estimateStory(back.id, 'app/api/routes.py::create_order', 4);
+  assert.ok(se.steps === sc.steps.length && se.estCost > 0);
+  const sr = await core.runStory(back.id, 'app/api/routes.py::create_order', 4);
+  const story = sr.view.stories.find((x) => x.entry === 'app/api/routes.py::create_order');
+  assert.equal(story.title, 'Тестовый сценарий');
+  assert.equal(Object.keys(story.texts).length, sc.steps.length);
+  assert.equal(story.hash, sc.hash);
+  step(`рассказ сценария от ИИ: ${Object.keys(story.texts).length} шагов, $${sr.result.cost.toFixed(4)}`);
+
+  // 7. обновление: изменённая, новая и удалённая функции
   const copy = path.join(tmp, 'py-copy');
   fs.cpSync(PY, copy, { recursive: true });
   const s2 = await core.createSession(copy);
@@ -198,7 +237,7 @@ try {
   assert.ok(v.orphans.includes('app/rules.py::_rule_night_time'));
   step(`обновление: изменено ${v.lastUpdate.changed}, новых ${v.lastUpdate.added}, удалено ${v.lastUpdate.removed}; устаревшие и новые помечены`);
 
-  // 7. сессии переживают перезапуск
+  // 8. сессии переживают перезапуск
   const core2 = new MimisCore(path.join(tmp, 'data'));
   const list = await core2.listSessions();
   assert.equal(list.length, 3);

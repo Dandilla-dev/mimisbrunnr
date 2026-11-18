@@ -95,7 +95,9 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, lang TEXT, lines INT, doc TEXT, purpose TEXT, layer TEXT, error TEXT, code TEXT);
 CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY, file TEXT, name TEXT, kind TEXT, line INT, end_line INT, sig TEXT, route TEXT, doc TEXT, hash TEXT, ord INT);
-CREATE TABLE IF NOT EXISTS edges(src TEXT, dst TEXT);
+CREATE TABLE IF NOT EXISTS edges(src TEXT, dst TEXT, kind TEXT DEFAULT 'call');
+CREATE TABLE IF NOT EXISTS sites(src TEXT, dst TEXT, line INT, kind TEXT, ctx TEXT);
+CREATE TABLE IF NOT EXISTS stories(entry TEXT, depth INT, hash TEXT, title TEXT, summary TEXT, texts TEXT, model TEXT, updated TEXT, PRIMARY KEY(entry, depth));
 CREATE TABLE IF NOT EXISTS expl(id TEXT PRIMARY KEY, phrase TEXT, what TEXT, io TEXT, example TEXT, watch TEXT, hash TEXT, model TEXT, commit_short TEXT, updated TEXT, edited INT DEFAULT 0);
 CREATE TABLE IF NOT EXISTS layers(id TEXT PRIMARY KEY, name TEXT, description TEXT, ord INT);
 CREATE TABLE IF NOT EXISTS terms(term TEXT PRIMARY KEY, definition TEXT);
@@ -126,7 +128,7 @@ export class Session {
     const oldFiles = Object.fromEntries(rows(db, 'SELECT path, purpose, layer FROM files').map((r) => [r.path, r]));
     db.run('BEGIN');
     try {
-      db.run('DELETE FROM files'); db.run('DELETE FROM items'); db.run('DELETE FROM edges');
+      db.run('DELETE FROM files'); db.run('DELETE FROM items'); db.run('DELETE FROM edges'); db.run('DELETE FROM sites');
       if (layers) {
         db.run('DELETE FROM layers');
         layers.forEach((l, i) => db.run('INSERT INTO layers VALUES (?,?,?,?)', [l.id, l.name, l.description || '', i]));
@@ -143,7 +145,8 @@ export class Session {
       if (needNew && !known.has('new')) db.run('INSERT INTO layers VALUES (?,?,?,?)', ['new', 'Новые файлы', 'Появились после последней раскладки по слоям', 999]);
       analysis.items.forEach((it, i) => db.run('INSERT INTO items VALUES (?,?,?,?,?,?,?,?,?,?,?)',
         [it.id, it.file, it.name, it.kind, it.line, it.end, it.sig, it.route, it.doc, it.hash, i]));
-      for (const [a, b] of analysis.edges) db.run('INSERT INTO edges VALUES (?,?)', [a, b]);
+      for (const [a, b, k] of analysis.edges) db.run('INSERT INTO edges VALUES (?,?,?)', [a, b, k || 'call']);
+      for (const x of analysis.sites || []) db.run('INSERT INTO sites VALUES (?,?,?,?,?)', [x.src, x.tgt, x.line, x.kind, x.ctx || '']);
       db.run("DELETE FROM layers WHERE id NOT IN (SELECT DISTINCT layer FROM files) AND id='new'");
       db.run('COMMIT');
     } catch (e) { db.run('ROLLBACK'); throw e; }
@@ -159,7 +162,15 @@ export class Session {
   explMap() {
     return Object.fromEntries(rows(this.db, 'SELECT * FROM expl').map((r) => [r.id, r]));
   }
-  edges() { return rows(this.db, 'SELECT src, dst FROM edges').map((r) => [r.src, r.dst]); }
+  edges() { return rows(this.db, 'SELECT src, dst, kind FROM edges').map((r) => [r.src, r.dst, r.kind || 'call']); }
+  /** Места связей по порядку в коде: [откуда, куда, строка, 'call'|'ref', условие]. В разборах до 0.2 их нет. */
+  sites() { return rows(this.db, 'SELECT src, dst, line, kind, ctx FROM sites ORDER BY src, line').map((r) => [r.src, r.dst, r.line, r.kind, r.ctx]); }
+  stories() {
+    return rows(this.db, 'SELECT * FROM stories').map((r) => ({ ...r, texts: JSON.parse(r.texts || '{}') }));
+  }
+  saveStory(st) {
+    this.db.run('INSERT OR REPLACE INTO stories VALUES (?,?,?,?,?,?,?,?)', [st.entry, st.depth, st.hash, st.title || '', st.summary || '', JSON.stringify(st.texts || {}), st.model || '', now()]);
+  }
   code(file) { return rows(this.db, 'SELECT code FROM files WHERE path=?', [file])[0]?.code ?? null; }
 
   status(item, expl) {
@@ -188,6 +199,8 @@ export class Session {
       layers: rows(this.db, 'SELECT id, name, description FROM layers ORDER BY ord'),
       items,
       edges: this.edges(),
+      sites: this.sites(),
+      stories: this.stories(),
       expl: Object.fromEntries(Object.entries(expl).filter(([k]) => ids.has(k))),
       orphans: Object.keys(expl).filter((k) => !ids.has(k)),
       terms: rows(this.db, 'SELECT term, definition FROM terms ORDER BY term'),
@@ -278,6 +291,8 @@ export class Sessions {
     const SQLc = await sql();
     const db = new SQLc.Database(fs.readFileSync(file));
     db.run(SCHEMA);
+    // разборы до 0.2: у связей не было вида (вызов / передача)
+    if (!rows(db, 'PRAGMA table_info(edges)').some((c) => c.name === 'kind')) db.run("ALTER TABLE edges ADD COLUMN kind TEXT DEFAULT 'call'");
     const s = new Session(file, db);
     this.open.set(id, s);
     return s;

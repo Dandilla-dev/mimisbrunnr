@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('mimis', {
   saveExplanation: (id, itemId, entry) => call('expl:save', id, itemId, entry),
   confirmExplanation: (id, itemId) => call('expl:confirm', id, itemId),
   deleteExplanation: (id, itemId) => call('expl:delete', id, itemId),
+  estimateStory: (id, entry, depth) => call('story:estimate', id, entry, depth),
+  runStory: (id, entry, depth) => call('story:run', id, entry, depth),
   testAi: () => call('ai:test'),
   pickFolder: () => call('dialog:folder'),
   openExternal: (url) => call('open:external', url),

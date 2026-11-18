@@ -1,11 +1,12 @@
 // Разбор всего репозитория: файлы → функции/классы → граф вызовов → слои по папкам.
 import { initParsers, grammarFor } from './parse/treesitter.js';
-import { parsePython, pythonEdges } from './parse/python.js';
-import { parseJs, jsEdges } from './parse/js.js';
+import { parsePython, pythonSites } from './parse/python.js';
+import { parseJs, jsSites } from './parse/js.js';
 
 /**
  * @param {{path: string, text: string}[]} sources
- * @returns {{files: object, items: object[], edges: string[][], code: object}}
+ * @returns {{files: object, items: object[], edges: string[][], sites: object[], code: object}}
+ * edges: [откуда, куда, 'call'|'ref'] — по одному на пару; sites — каждое место в коде.
  */
 export async function analyzeSources(sources) {
   await initParsers();
@@ -35,9 +36,19 @@ export async function analyzeSources(sources) {
     files[file] = entry;
   }
 
-  const ids = new Set(items.map((i) => i.id));
-  const edges = [...pythonEdges(pyFacts, ids), ...jsEdges(jsFacts, itemsByFile, ids)];
-  return { files, items, edges, code };
+  const kinds = new Map(items.map((i) => [i.id, i.kind]));
+  const raw = [...pythonSites(pyFacts, kinds), ...jsSites(jsFacts, itemsByFile, kinds)];
+  // одно место — одна запись (вызов в аргументах другого вызова не дублируем)
+  const seen = new Set();
+  const sites = raw.filter((s) => { const k = `${s.src}\u0000${s.tgt}\u0000${s.line}\u0000${s.kind}`; if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => (a.src < b.src ? -1 : a.src > b.src ? 1 : a.line - b.line));
+  const pair = new Map();
+  for (const s of sites) {
+    const k = `${s.src}\u0000${s.tgt}`;
+    if (!pair.has(k) || s.kind === 'call') pair.set(k, s.kind);
+  }
+  const edges = [...pair].map(([k, kind]) => [...k.split('\u0000'), kind]);
+  return { files, items, edges, sites, code };
 }
 
 /**

@@ -26,6 +26,7 @@ function EdgeDetails({ ix, edge, title, onClose }) {
             <button className="hover:text-bronze" onClick={() => dispatch(go({ t: 'fn', id: a }))}>{ix.itemById[a]?.name}</button>
             <span className="text-mist-dim">→</span>
             <button className="hover:text-bronze" onClick={() => dispatch(go({ t: 'fn', id: b }))}>{ix.itemById[b]?.name}</button>
+            {ix.edgeKind[`${a}>${b}`] === 'ref' && <span className="text-[10.5px] text-bronze/80">передаётся</span>}
             <span className="text-mist-dim text-[10.5px]">{ix.itemById[a]?.file.split('/').pop()} → {ix.itemById[b]?.file.split('/').pop()}</span>
           </div>
         ))}
@@ -175,7 +176,7 @@ export function FnDiagram({ view, ix, id }) {
       return { id: x, label: it.name, sub: `${it.file.split('/').pop()}:${it.line}`, mono: true, color: layerColor(view, ix.fileByPath[it.file]?.layer), emphasis: x === id ? 'center' : undefined, title: it.phrase || it.name };
     });
     const es = view.edges.filter(([a, b]) => set.has(a) && set.has(b) && (depth > 1 || a === id || b === id))
-      .map(([a, b]) => ({ id: `${a}>${b}`, source: a, target: b }));
+      .map(([a, b, k]) => ({ id: `${a}>${b}`, source: a, target: b, dashed: k === 'ref' }));
     return { nodes: ns, edges: es, cut: cutCount };
   }, [view, ix, id, depth]);
   return (
@@ -192,7 +193,7 @@ export function FnDiagram({ view, ix, id }) {
         onNodeClick={(n) => { if (n.id !== id) dispatch(go({ t: 'fn', id: n.id })); }}
         emptyText="Связей нет."
       />
-      <div className="text-[12px] text-mist-dim mt-2">Слева — кто вызывает эту функцию, справа — кого вызывает она. Цвет полоски — часть проекта.</div>
+      <div className="text-[12px] text-mist-dim mt-2">Слева — кто вызывает эту функцию, справа — кого вызывает она. Пунктир — функция не вызывается, а передаётся (например, в onClick или аргументом): её вызовут позже. Цвет полоски — часть проекта.</div>
     </div>
   );
 }

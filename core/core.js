@@ -5,6 +5,7 @@ import { fetchTarget, parseTarget } from './fetchRepo.js';
 import { analyzeSources, layersByFolder } from './analyze.js';
 import { plan, runExplain } from './explain.js';
 import { callModel, PRESETS, costOf } from './llm.js';
+import { storyPlan, runStory } from './story.js';
 
 export class MimisCore {
   constructor(dataDir, { crypt = null, fetchFn = fetch } = {}) {
@@ -98,6 +99,23 @@ export class MimisCore {
   }
   async confirmExplanation(id, itemId) { const s = await this.sessions.get(id); s.confirmExplanation(itemId); s.save(); return s.view(); }
   async deleteExplanation(id, itemId) { const s = await this.sessions.get(id); s.deleteExplanation(itemId); s.save(); return s.view(); }
+
+  // ---- сценарии: рассказ от ИИ ----
+  async estimateStory(id, entry, depth) {
+    const s = await this.sessions.get(id);
+    const p = storyPlan(s.view(), (f) => s.code(f), entry, depth, this.settings.data.provider);
+    return { steps: p.steps, estIn: p.estIn, estOut: p.estOut, estCost: p.estCost, priced: p.priced };
+  }
+  async runStory(id, entry, depth) {
+    if (this.jobs.has(id)) throw new Error('Сейчас идёт объяснение — дождитесь окончания или остановите его.');
+    const s = await this.sessions.get(id);
+    const ctrl = new AbortController();
+    this.jobs.set(id, { ctrl, state: { status: 'running', log: ['Рассказ сценария…'], done: 0, total: 1, spent: 0 } });
+    try {
+      const r = await runStory({ session: s, settings: this.settings, provider: this.settings.data.provider, apiKey: this.settings.apiKey(), fetchFn: this.fetchFn, signal: ctrl.signal }, entry, depth);
+      return { result: r, view: s.view() };
+    } finally { this.jobs.delete(id); }
+  }
 
   async testConnection() {
     const p = this.settings.data.provider;

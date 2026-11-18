@@ -68,7 +68,7 @@ export function parseJs(file, source, grammar) {
       hash: codeHash(outer, skipHash),
     };
     items.push(item);
-    ranges.push({ id, start: outer.startIndex, end: outer.endIndex, short: name.split('.').pop() });
+    ranges.push({ id, start: outer.startIndex, end: outer.endIndex, short: name.split('.').pop(), fn: fn || null, body: body || null });
     return item;
   }
 
@@ -252,7 +252,12 @@ function collectFacts(root, ranges, stem) {
       if (decl) {
         const names = [];
         if (field(decl, 'name')) names.push(field(decl, 'name').text);
-        for (const d of decl.namedChildren) if (d.type === 'variable_declarator' && field(d, 'name')?.type === 'identifier') names.push(field(d, 'name').text);
+        for (const d of decl.namedChildren) {
+          if (d.type !== 'variable_declarator') continue;
+          const dn = field(d, 'name');
+          if (dn?.type === 'identifier') names.push(dn.text);
+          else if (dn?.type === 'object_pattern') for (const p of dn.namedChildren) if (p.type === 'shorthand_property_identifier_pattern') names.push(p.text);
+        }
         for (const nm of names) exportsMap[isDefault ? 'default' : nm] = nm;
       } else if (isDefault) {
         const v = field(n, 'value') || n.namedChildren[0];
@@ -301,39 +306,197 @@ function collectFacts(root, ranges, stem) {
     }
   }
 
-  // ссылки: вызовы, <Компонент/>, обработчики в JSX-атрибутах, this.method()
-  const refs = []; // { from: id, t: 'name'|'member'|'this', name, obj }
-  const sorted = [...ranges].sort((a, b) => (a.end - a.start) - (b.end - b.start));
-  const owner = (node) => sorted.find((r) => r.start <= node.startIndex && node.endIndex <= r.end)?.id || null;
-  for (const n of walk(root)) {
-    let ref = null;
-    if (n.type === 'call_expression' || n.type === 'new_expression') {
-      const f = field(n, 'function') || field(n, 'constructor');
-      if (f?.type === 'identifier') ref = { t: 'name', name: f.text };
-      else if (f?.type === 'member_expression') {
-        const o = field(f, 'object'), p = field(f, 'property')?.text;
-        if (o?.type === 'this') ref = { t: 'this', name: p };
-        else if (o?.type === 'identifier') ref = { t: 'member', obj: o.text, name: p };
-      }
-    } else if (n.type === 'jsx_opening_element' || n.type === 'jsx_self_closing_element') {
-      const nm = field(n, 'name');
-      if (nm?.type === 'identifier' && /^[A-Z]/.test(nm.text)) ref = { t: 'name', name: nm.text };
-      else if (nm?.type === 'member_expression') ref = { t: 'member', obj: field(nm, 'object').text, name: field(nm, 'property').text };
-    } else if (n.type === 'jsx_expression') {
-      const e = n.namedChild(0);
-      if (e?.type === 'identifier') ref = { t: 'name', name: e.text };
-    }
-    if (!ref) continue;
-    const from = owner(n);
-    if (from) refs.push({ from, ...ref });
+  // Места связей по каждой функции: вызовы, <Компонент/>, функции, переданные
+  // аргументом или в JSX-атрибут (onClick={handle}), с номером строки и условием
+  // вокруг (if / else / ?: / && / for / try / .map(…)). Плюс локальные переменные
+  // и тип результата — чтобы узнать, чей метод вызывается: s = new Store(); s.add().
+  const rangeAt = new Map(ranges.map((r) => [`${r.start}:${r.end}`, r]));
+  const sites = []; // { from, line, kind, ctx, target }
+  const aliases = {}; // короткое имя → полное имя в этом файле (см. createSlice actions)
+  const locals = {}; // id функции | '' (уровень файла) → { имя: spec }
+  const fnInfo = {}; // id → { retAnn, ret }
+  const classAttrs = {}; // класс → { поле: { ann } | { spec, owner } }
+  const parentOf = {};
+  for (const r of ranges) {
+    const p = ranges.filter((q) => q !== r && q.start <= r.start && r.end <= q.end).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
+    parentOf[r.id] = p?.id || '';
+    fnInfo[r.id] = { retAnn: field(r.fn, 'return_type')?.text?.replace(/^:\s*/, '') || null, ret: null };
+    if (r.body && r.body.type !== 'statement_block' && r.body.type !== 'class_body') fnInfo[r.id].ret = jsSpec(r.body);
   }
-  return { imports, exportsMap, refs };
+  const short = (t, n = 48) => { const c = (t || '').replace(/\s+/g, ' ').trim(); return c.length > n ? `${c.slice(0, n - 1)}…` : c; };
+  const add = (n, owner, ctx, kind, target) => { if (owner) sites.push({ from: owner, line: n.startPosition.row + 1, kind, ctx: ctx.slice(-2).join(' › '), target }); };
+  const bind = (owner, name, spec) => { const m = (locals[owner || ''] ||= {}); if (spec && !(name in m)) m[name] = spec; };
+  const refOf = (n) => {
+    if (n.type === 'identifier') return { t: 'name', name: n.text };
+    if (n.type === 'member_expression') {
+      const o = field(n, 'object'), p = field(n, 'property')?.text;
+      if (o?.type === 'this') return { t: 'this', name: p };
+      return { t: 'member', obj: o?.type === 'identifier' ? o.text : null, objSpec: jsSpec(o), name: p };
+    }
+    return null;
+  };
+  const isRefNode = (n) => n && (n.type === 'identifier' || (n.type === 'member_expression' && ['this', 'identifier'].includes(field(n, 'object')?.type)));
+
+  function v(n, ctx, owner) {
+    if (!n) return;
+    const r = rangeAt.get(`${n.startIndex}:${n.endIndex}`);
+    if (r && r.id !== owner) { owner = r.id; ctx = []; }
+    switch (n.type) {
+      case 'call_expression': case 'new_expression': {
+        const f = field(n, 'function') || field(n, 'constructor');
+        const ref = f && refOf(f);
+        if (ref) add(n, owner, ctx, 'call', ref);
+        if (f && f.type === 'member_expression') v(field(f, 'object'), ctx, owner);
+        else if (f && !ref) v(f, ctx, owner);
+        const label = `${short(f?.text || '', 28)}(…)`;
+        const own = r && r.id === owner; // маршрут app.get('/x', (req, res) => …) — это сама функция, не «внутри вызова»
+        for (const a of field(n, 'arguments')?.namedChildren || []) {
+          if (isRefNode(a)) add(a, owner, ctx, 'ref', refOf(a));
+          else if (FUNC.has(a.type) && !rangeAt.has(`${a.startIndex}:${a.endIndex}`)) v(a, own ? ctx : [...ctx, label], owner);
+          else v(a, ctx, owner);
+        }
+        return;
+      }
+      case 'jsx_opening_element': case 'jsx_self_closing_element': {
+        const nm = field(n, 'name');
+        if (nm?.type === 'identifier' && /^[A-Z]/.test(nm.text)) add(n, owner, ctx, 'call', { t: 'name', name: nm.text });
+        else if (nm?.type === 'member_expression') add(n, owner, ctx, 'call', { t: 'member', obj: field(nm, 'object').text, objSpec: jsSpec(field(nm, 'object')), name: field(nm, 'property').text });
+        for (const c of n.namedChildren) if (c !== nm) v(c, ctx, owner);
+        return;
+      }
+      case 'jsx_expression': {
+        const e = n.namedChild(0);
+        if (isRefNode(e)) { add(e, owner, ctx, 'ref', refOf(e)); return; }
+        break;
+      }
+      case 'pair': {
+        const val = field(n, 'value');
+        if (isRefNode(val)) { add(val, owner, ctx, 'ref', refOf(val)); return; }
+        break;
+      }
+      case 'array': {
+        for (const c of n.namedChildren) if (isRefNode(c) && c.type === 'identifier') add(c, owner, ctx, 'ref', refOf(c)); else v(c, ctx, owner);
+        return;
+      }
+      case 'variable_declarator': {
+        const nm = field(n, 'name'), typ = field(n, 'type'), val = field(n, 'value');
+        // const { addItem } = cartSlice.actions → addItem это редьюсер cartSlice.addItem
+        if (nm?.type === 'object_pattern' && val?.type === 'member_expression' && field(val, 'property')?.text === 'actions' && field(val, 'object')?.type === 'identifier') {
+          for (const p of nm.namedChildren) if (p.type === 'shorthand_property_identifier_pattern') aliases[p.text] = `${field(val, 'object').text}.${p.text}`;
+        }
+        if (nm?.type === 'identifier') bind(owner, nm.text, typ ? { k: 'ann', text: typ.text.replace(/^:\s*/, '') } : jsSpec(val));
+        if (isRefNode(val) && val.type === 'identifier') add(val, owner, ctx, 'ref', refOf(val));
+        else v(val, ctx, owner);
+        return;
+      }
+      case 'required_parameter': case 'optional_parameter': {
+        const pat = field(n, 'pattern'), typ = field(n, 'type');
+        if (pat?.type === 'identifier' && typ) bind(owner, pat.text, { k: 'ann', text: typ.text.replace(/^:\s*/, '') });
+        v(field(n, 'value'), ctx, owner);
+        return;
+      }
+      case 'assignment_expression': {
+        const l = field(n, 'left'), rt = field(n, 'right');
+        if (l?.type === 'member_expression' && field(l, 'object')?.type === 'this' && owner) {
+          const cls = owner.split('::')[1].split('.')[0];
+          const attrs = (classAttrs[cls] ||= {});
+          attrs[field(l, 'property').text] ??= { spec: jsSpec(rt), owner };
+        }
+        if (isRefNode(rt) && rt.type === 'identifier') add(rt, owner, ctx, 'ref', refOf(rt));
+        else v(rt, ctx, owner);
+        v(l, ctx, owner);
+        return;
+      }
+      case 'public_field_definition': case 'field_definition': {
+        const nm = field(n, 'name') || field(n, 'property'), typ = field(n, 'type');
+        const cls = n.parent?.parent && field(n.parent.parent, 'name')?.text;
+        if (cls && nm && typ) ((classAttrs[cls] ||= {})[nm.text] = { ann: typ.text.replace(/^:\s*/, '') });
+        break;
+      }
+      case 'return_statement': {
+        const e = n.namedChild(0);
+        if (owner && e && !fnInfo[owner].ret) fnInfo[owner].ret = jsSpec(e);
+        if (isRefNode(e) && e.type === 'identifier') { add(e, owner, ctx, 'ref', refOf(e)); return; }
+        break;
+      }
+      case 'if_statement': {
+        v(field(n, 'condition'), ctx, owner);
+        v(field(n, 'consequence'), [...ctx, `if ${short(field(n, 'condition')?.text)}`], owner);
+        v(field(n, 'alternative'), [...ctx, 'else'], owner);
+        return;
+      }
+      case 'ternary_expression': {
+        const c = short(field(n, 'condition')?.text, 36);
+        v(field(n, 'condition'), ctx, owner);
+        v(field(n, 'consequence'), [...ctx, `${c} ?`], owner);
+        v(field(n, 'alternative'), [...ctx, `${c} ? … :`], owner);
+        return;
+      }
+      case 'binary_expression': {
+        const op = n.children.find((c) => !c.isNamed)?.text;
+        if (op === '&&' || op === '||' || op === '??') {
+          v(field(n, 'left'), ctx, owner);
+          v(field(n, 'right'), [...ctx, `${short(field(n, 'left')?.text, 36)} ${op}`], owner);
+          return;
+        }
+        break;
+      }
+      case 'for_statement': case 'for_in_statement': case 'while_statement': case 'do_statement': {
+        const body = field(n, 'body');
+        for (const c of n.namedChildren) if (c !== body) v(c, ctx, owner);
+        const head = n.type === 'for_in_statement' ? `for (${short(field(n, 'left')?.text, 16)} of ${short(field(n, 'right')?.text, 28)})` : n.type === 'for_statement' ? 'for (…)' : `while ${short(field(n, 'condition')?.text, 36)}`;
+        v(body, [...ctx, head], owner);
+        return;
+      }
+      case 'try_statement':
+        v(field(n, 'body'), [...ctx, 'try'], owner);
+        v(field(n, 'handler'), [...ctx, 'catch'], owner);
+        v(field(n, 'finalizer'), [...ctx, 'finally'], owner);
+        return;
+      case 'switch_case': {
+        const val = field(n, 'value');
+        for (const c of n.namedChildren) if (c !== val) v(c, [...ctx, `case ${short(val?.text, 30)}:`], owner);
+        return;
+      }
+      case 'switch_default':
+        for (const c of n.namedChildren) v(c, [...ctx, 'default:'], owner);
+        return;
+      default: break;
+    }
+    for (const c of n.namedChildren) v(c, ctx, owner);
+  }
+  v(root, [], null);
+  for (const [k, full] of Object.entries(aliases)) if (exportsMap[k] === k) exportsMap[k] = full;
+  return { imports, exportsMap, sites, locals, fnInfo, classAttrs, parentOf, aliases };
+}
+
+// выражение → простое описание для вывода типа
+function jsSpec(n) {
+  if (!n) return null;
+  switch (n.type) {
+    case 'identifier': return { k: 'var', name: n.text };
+    case 'this': return { k: 'this' };
+    case 'new_expression': { const c = field(n, 'constructor'); return c?.type === 'identifier' ? { k: 'new', name: c.text } : null; }
+    case 'call_expression': {
+      const f = field(n, 'function');
+      if (f?.type === 'identifier') return { k: 'call', name: f.text };
+      if (f?.type === 'member_expression') return { k: 'mcall', obj: jsSpec(field(f, 'object')), attr: field(f, 'property')?.text };
+      return null;
+    }
+    case 'member_expression': return { k: 'attr', obj: jsSpec(field(n, 'object')), attr: field(n, 'property')?.text };
+    case 'await_expression': case 'parenthesized_expression': case 'as_expression': case 'non_null_expression': case 'satisfies_expression':
+      return jsSpec(n.namedChild(0));
+    default: return null;
+  }
 }
 
 // ---- граф для всех JS-файлов ----
 const EXTS = ['', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '/index.js', '/index.jsx', '/index.ts', '/index.tsx'];
 
-export function jsEdges(jsFiles, itemsByFile, itemIds) {
+/**
+ * Места связей для всех JS-файлов: { src, tgt, line, kind: 'call'|'ref', ctx }.
+ */
+export function jsSites(jsFiles, itemsByFile, kinds) {
   const files = new Set(Object.keys(jsFiles));
   const resolveSource = (from, src) => {
     if (!src.startsWith('.')) return null;
@@ -341,45 +504,125 @@ export function jsEdges(jsFiles, itemsByFile, itemIds) {
     for (const e of EXTS) if (files.has(base + e)) return base + e;
     return null;
   };
-  const byName = {}; // file → { полное имя → id, короткое имя верхнего уровня → id }
+  const byName = {}; // file → { полное имя → id }
   for (const [f, items] of Object.entries(itemsByFile)) {
     const m = {};
     for (const it of items) m[it.name] = it.id;
     byName[f] = m;
   }
-  const exported = (file, name) => {
+  const exportedLocal = (file, name) => {
     const ex = jsFiles[file]?.exportsMap || {};
-    const local = name === 'default' ? ex.default : ex[name] || name;
-    return local ? byName[file]?.[local] || null : null;
+    return name === 'default' ? ex.default : ex[name] || name;
   };
+  const exported = (file, name) => { const l = exportedLocal(file, name); return l ? byName[file]?.[l] || null : null; };
+  const nameOf = (id) => id.split('::')[1].replace(/#\d+$/, '');
 
-  const edges = new Set();
+  // имя в функции owner файла file → id (сначала вложенные, потом файл, потом импорт)
+  function resolveName(file, owner, name) {
+    const names = byName[file] || {};
+    const parts = owner ? nameOf(owner).split('.') : [];
+    for (let i = parts.length; i >= 0; i--) { const id = names[[...parts.slice(0, i), name].join('.')]; if (id) return id; }
+    const al = jsFiles[file]?.aliases?.[name];
+    if (al && names[al]) return names[al];
+    const imp = jsFiles[file]?.imports[name];
+    if (imp) { const tf = resolveSource(file, imp.source); if (tf) return exported(tf, imp.name === '*' ? 'default' : imp.name); }
+    return null;
+  }
+  const classMethod = (clsId, m) => {
+    if (!clsId) return null;
+    const [f, cls] = clsId.split('::');
+    return byName[f]?.[`${cls}.${m}`] || null;
+  };
+  const isClass = (id) => id && kinds.get(id) === 'class';
+  function annType(file, owner, text) {
+    if (!text) return null;
+    const words = (text.match(/[A-Za-z_$][\w$]*/g) || []).filter((w) => !['Promise', 'Array', 'Readonly', 'Partial', 'ReadonlyArray', 'undefined', 'null', 'typeof'].includes(w));
+    for (const w of words) { const id = resolveName(file, owner, w); if (isClass(id)) return id; }
+    return null;
+  }
+  const retMemo = new Map();
+  function retType(id, depth) {
+    if (!id || depth > 6) return null;
+    if (retMemo.has(id)) return retMemo.get(id);
+    retMemo.set(id, null);
+    const file = id.split('::')[0];
+    const info = jsFiles[file]?.fnInfo[id];
+    const t = info ? annType(file, id, info.retAnn) || typeOf(info.ret, file, id, depth + 1) : null;
+    retMemo.set(id, t);
+    return t;
+  }
+  function localSpec(file, owner, name) {
+    const facts = jsFiles[file];
+    for (let o = owner || ''; ; o = facts.parentOf[o] || '') {
+      const m = facts.locals[o];
+      if (m && name in m) return { spec: m[name], owner: o };
+      if (!o) return null;
+    }
+  }
+  function typeOf(spec, file, owner, depth = 0) {
+    if (!spec || depth > 8) return null;
+    switch (spec.k) {
+      case 'this': { const cls = owner && nameOf(owner).split('.')[0]; const id = cls && byName[file]?.[cls]; return isClass(id) ? id : null; }
+      case 'var': {
+        const l = localSpec(file, owner, spec.name);
+        if (l && l.spec !== spec) return typeOf(l.spec, file, l.owner || null, depth + 1);
+        const imp = jsFiles[file].imports[spec.name];
+        if (imp) {
+          const tf = resolveSource(file, imp.source);
+          const local = tf && exportedLocal(tf, imp.name === '*' ? 'default' : imp.name);
+          const m = local && jsFiles[tf].locals[''];
+          if (m && local in m) return typeOf(m[local], tf, null, depth + 1);
+        }
+        return null;
+      }
+      case 'ann': return annType(file, owner, spec.text);
+      case 'new': { const id = resolveName(file, owner, spec.name); return isClass(id) ? id : null; }
+      case 'call': return retType(resolveName(file, owner, spec.name), depth);
+      case 'mcall': {
+        const t = typeOf(spec.obj, file, owner, depth + 1);
+        if (t) return retType(classMethod(t, spec.attr), depth);
+        if (spec.obj?.k === 'var') {
+          const imp = jsFiles[file].imports[spec.obj.name];
+          const tf = imp && resolveSource(file, imp.source);
+          if (tf) return retType(exported(tf, spec.attr), depth);
+        }
+        return null;
+      }
+      case 'attr': {
+        const t = typeOf(spec.obj, file, owner, depth + 1);
+        if (!t) return null;
+        const [cf, cls] = t.split('::');
+        const x = jsFiles[cf]?.classAttrs[cls]?.[spec.attr];
+        if (x?.ann) return annType(cf, null, x.ann);
+        if (x?.spec) return typeOf(x.spec, cf, x.owner, depth + 1);
+        return null;
+      }
+      default: return null;
+    }
+  }
+
+  const out = [];
   for (const [file, facts] of Object.entries(jsFiles)) {
     const names = byName[file] || {};
-    for (const r of facts.refs) {
+    for (const s of facts.sites) {
+      const r = s.target;
       let tgt = null;
-      const fromName = r.from.split('::')[1].replace(/#\d+$/, '');
-      if (r.t === 'name') {
-        // сначала вложенные в ту же внешнюю функцию, потом верхний уровень файла, потом импорт
-        const parts = fromName.split('.');
-        for (let i = parts.length; i >= 0 && !tgt; i--) tgt = names[[...parts.slice(0, i), r.name].join('.')] || null;
-        if (!tgt && facts.imports[r.name]) {
-          const imp = facts.imports[r.name];
-          const tf = resolveSource(file, imp.source);
-          if (tf) tgt = exported(tf, imp.name === '*' ? 'default' : imp.name);
-        }
-      } else if (r.t === 'this') {
-        const cls = fromName.split('.')[0];
+      if (r.t === 'name') tgt = resolveName(file, s.from, r.name);
+      else if (r.t === 'this') {
+        const cls = nameOf(s.from).split('.')[0];
         tgt = names[`${cls}.${r.name}`] || null;
       } else if (r.t === 'member') {
-        const imp = facts.imports[r.obj];
+        const imp = r.obj ? facts.imports[r.obj] : null;
         if (imp) {
           const tf = resolveSource(file, imp.source);
           if (tf) tgt = exported(tf, r.name) || byName[tf]?.[`${exported(tf, 'default')?.split('::')[1]}.${r.name}`] || null;
-        } else tgt = names[`${r.obj}.${r.name}`] || null; // chatSlice.actions… / объект в том же файле
+        } else if (r.obj && names[`${r.obj}.${r.name}`]) tgt = names[`${r.obj}.${r.name}`]; // объект в том же файле
+        if (!tgt) tgt = classMethod(typeOf(r.objSpec, file, s.from), r.name);
       }
-      if (tgt && tgt !== r.from && itemIds.has(tgt)) edges.add(`${r.from}\u0000${tgt}`);
+      if (!tgt || tgt === s.from || !kinds.has(tgt)) continue;
+      if (s.kind === 'ref' && kinds.get(tgt) === 'class') continue;
+      out.push({ src: s.from, tgt, line: s.line, kind: s.kind, ctx: s.ctx });
     }
   }
-  return [...edges].map((e) => e.split('\u0000'));
+  return out;
 }
