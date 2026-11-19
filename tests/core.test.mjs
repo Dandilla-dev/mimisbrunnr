@@ -260,6 +260,14 @@ try {
   assert.equal(post.chain[0].label, 'express.json()');
   assert.ok(post.errors.some((x) => x.id === 'src/middlewares/error.middleware.js::errorHandler'));
   assert.ok(rt(ex, 'DELETE', '/api/readers/:id')); // router.route('/readers/:id').get().delete()
+  assert.deepEqual(rt(ex, 'GET', '/api/books/:isbn').chain.map((x) => x.role), ['middleware', 'middleware', 'auth', 'router', 'validate', 'handler']); // [checkIsbn]
+  const stats = rt(ex, 'GET', '/admin/stats'); // вложенное приложение: с префиксом и общими обработчиками
+  assert.ok(stats && !stats.incomplete && stats.chain[0].label === 'express.json()');
+  assert.ok(!rt(ex, 'GET', '/stats')); // и не дублируется как отдельное приложение
+  const daily = rt(ex, 'GET', '/daily'); // подключён в цикле — честно помечен
+  assert.ok(daily.incomplete && /server\.js:\d+/.test(daily.reason));
+  assert.ok(post.chain.every((x) => x.role !== 'unknown') && rt(ex, 'GET', '/admin/stats').chain.every((x) => x.role !== 'unknown'));
+  assert.ok(!post.incomplete && !post.guess);
   const exE = Object.fromEntries(ex.entities.map((e) => [e.id.split('::')[1], e]));
   assert.equal(exE.Book.table, 'books');
   assert.ok(exE.Book.fields.find((f) => f.name === 'isbn').pk);

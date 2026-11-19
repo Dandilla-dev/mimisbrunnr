@@ -1,7 +1,7 @@
 {
   "name": "mimisbrunnr",
   "productName": "Mimisbrunnr",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Mímisbrunnr — разбирает код репозитория и объясняет его простыми словами",
   "author": "Danila Gorshunov",
   "license": "UNLICENSED",

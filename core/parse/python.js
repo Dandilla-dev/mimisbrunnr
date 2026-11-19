@@ -564,7 +564,7 @@ export function pythonSites(pyFiles, kinds) {
     return { role, id: kinds.has(id) ? id : null, label: `Depends(${name})`, about: where, file, line: 0 };
   };
   const seenC = new Set();
-  function walkC(key, prefix, before, deps, errors, depth = 0) {
+  function walkC(key, prefix, before, deps, errors, depth = 0, flags = null) {
     const c = containers[key];
     if (!c || depth > 6) return;
     seenC.add(key);
@@ -594,13 +594,13 @@ export function pythonSites(pyFiles, kinds) {
         ? { role: 'error', id: null, label: 'встроенная обработка FastAPI', about: 'HTTPException → ответ с её кодом; ошибка проверки данных → 422; прочие ошибки → 500' }
         : { role: 'error', id: null, label: 'встроенная обработка Flask', about: 'abort(код) → ответ с этим кодом; прочие ошибки → 500' };
       for (const m of r.methods) {
-        routes.push({ id: r.id, method: m, path: join(pre, r.path), fw: c.fw, file: r.file, line: r.line, chain, errors: [...errs, builtin], response: r.responseModel ? { model: byModel[r.responseModel] || null, text: r.responseModel, status: r.status } : null });
+        routes.push({ ...(flags || {}), id: r.id, method: m, path: join(pre, r.path), fw: c.fw, file: r.file, line: r.line, chain, errors: [...errs, builtin], response: r.responseModel ? { model: byModel[r.responseModel] || null, text: r.responseModel, status: r.status } : null });
       }
     }
     for (const inc of c.includes) {
       if (!inc.target) continue;
       const rs = { role: 'router', id: null, label: inc.text, about: `подключён${inc.prefix ? ` по адресу ${join(pre, inc.prefix)}` : ''}`, file: inc.file, line: inc.line };
-      walkC(inc.target, join(pre, inc.prefix), [...mws, rs], [...allDeps, ...inc.deps.map((n) => depStep(inc.file, n, 'зависимость подключения'))], errs, depth + 1);
+      walkC(inc.target, join(pre, inc.prefix), [...mws, rs], [...allDeps, ...inc.deps.map((n) => depStep(inc.file, n, 'зависимость подключения'))], errs, depth + 1, flags);
     }
     for (const x of c.mws) if (x.id) roles[x.id] ??= x.role;
     for (const x of c.errors) if (x.id) roles[x.id] = 'error';
@@ -615,8 +615,18 @@ export function pythonSites(pyFiles, kinds) {
     if (app) {
       const inc = app.includes.find((i) => !i.target);
       const rs = { role: 'router', id: null, label: `${c.name} · ${c.file}`, about: `подключён к приложению (${inc.text})`, file: inc.file, line: inc.line };
-      walkC(key, '', [...app.ext, ...app.mws, rs], [], app.errors);
-    } else walkC(key, '', [], [], []);
+      walkC(key, '', [...app.ext, ...app.mws, rs], [], app.errors, 0, {
+        guess: true,
+        reason: `Подключение найдено предположительно: в ${inc.file}:${inc.line} стоит ${c.fw === 'flask' ? 'register_blueprint' : 'include_router'}(${inc.text}), и по коду не видно, какой роутер туда попадает. Префикс адреса, если он задан там, не показан.`,
+      });
+    } else {
+      walkC(key, '', [], [], [], 0, {
+        incomplete: true,
+        reason: vague.length
+          ? `Возможно, он подключается здесь: ${vague.flatMap((a) => a.includes.filter((i) => !i.target).map((i) => `${i.file}:${i.line} (${i.text})`)).join('; ')} — но таких мест несколько, и по коду не понять, какое.`
+          : 'В коде не нашлось места, где этот роутер подключается к приложению.',
+      });
+    }
   }
   return { sites: out, entities, promote, web: { routes, roles } };
 }

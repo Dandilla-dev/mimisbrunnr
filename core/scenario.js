@@ -56,7 +56,7 @@ function hashStr(s) {
 export const ROLE_RU = {
   request: 'запрос', router: 'роутер', middleware: 'промежуточный обработчик', auth: 'проверка доступа', validate: 'проверка данных',
   dependency: 'зависимость', controller: 'обработчик', handler: 'обработчик', service: 'сервис', repository: 'репозиторий',
-  entity: 'база данных', data: 'данные', schema: 'схема данных', response: 'ответ', 'error-branch': 'ошибки', error: 'обработчик ошибок', route: 'маршрут',
+  unknown: 'неизвестно', entity: 'база данных', data: 'данные', schema: 'схема данных', response: 'ответ', 'error-branch': 'ошибки', error: 'обработчик ошибок', route: 'маршрут',
 };
 
 // Роль шага по месту в проекте — когда разбор не знает её точно

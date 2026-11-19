@@ -16,7 +16,7 @@ const ROLE_TONE = {
   request: 'text-stone border-mist-dim', router: 'text-mist border-hairline', middleware: 'text-[#9AA5C9] border-[#9AA5C9]/40',
   auth: 'text-[#D98787] border-[#D98787]/40', validate: 'text-[#C8B27A] border-[#C8B27A]/40', dependency: 'text-[#9AA5C9] border-[#9AA5C9]/40',
   controller: 'text-bronze border-bronze/50', service: 'text-[#7FA08A] border-[#7FA08A]/40', repository: 'text-[#8FB59A] border-[#8FB59A]/40',
-  entity: 'text-[#A9C2D8] border-[#A9C2D8]/40', data: 'text-mist border-hairline', schema: 'text-[#C8B27A] border-[#C8B27A]/40', response: 'text-[#7FA08A] border-[#7FA08A]/50', 'error-branch': 'text-[#D98787] border-[#D98787]/40', error: 'text-[#D98787] border-[#D98787]/40',
+  unknown: 'text-[#D98787] border-dashed border-[#D98787]/60', entity: 'text-[#A9C2D8] border-[#A9C2D8]/40', data: 'text-mist border-hairline', schema: 'text-[#C8B27A] border-[#C8B27A]/40', response: 'text-[#7FA08A] border-[#7FA08A]/50', 'error-branch': 'text-[#D98787] border-[#D98787]/40', error: 'text-[#D98787] border-[#D98787]/40',
 };
 export const RoleChip = ({ role }) => (role ? <span className={`text-[9.5px] font-mono uppercase tracking-wide border rounded px-1 py-[1px] flex-shrink-0 ${ROLE_TONE[role] || 'text-mist border-hairline'}`}>{ROLE_RU[role] || role}</span> : null);
 const DEFAULT_DEPTH = 4;
@@ -70,6 +70,7 @@ export function ScenarioList({ view, ix }) {
                     className="text-left card px-3.5 py-2.5 hover:border-bronze/60 transition-colors" style={{ borderLeft: `3px solid ${layerColor(view, ix.fileByPath[h?.file]?.layer)}` }}>
                     {st?.title && <div className="font-display text-[14px] text-stone leading-snug">{st.title}</div>}
                     <div className="font-mono text-[12.5px] truncate"><span className="text-bronze/90">{r.method}</span> {r.path}</div>
+                    {(r.incomplete || r.guess) && <div className="text-[11px] text-[#D98787] mt-0.5">{r.incomplete ? '⚠ путь неполный: не понять, как подключён роутер' : '⚠ подключение найдено предположительно'}</div>}
                     <div className="flex flex-wrap gap-1 mt-1.5">{r.chain.map((c, i) => <RoleChip key={i} role={c.role === 'handler' ? 'controller' : c.role} />)}</div>
                     <div className="font-mono text-[10.5px] text-mist-dim truncate mt-1">{h ? `${h.name} · ${h.file}` : r.file}</div>
                   </button>
@@ -225,6 +226,13 @@ export function ScenarioView({ view, ix, id, method }) {
         <StoryButton view={view} id={id} depth={depth} story={story} fresh={fresh} />
       </div>
 
+      {route && (route.incomplete || route.guess) && (
+        <div className="mt-4 rounded-xl border border-[#D98787]/50 bg-[#D98787]/10 px-4 py-3 text-[13.5px] leading-relaxed">
+          <b>{route.incomplete ? 'Не удалось понять, как подключён этот роутер — общие обработчики и префикс могут отсутствовать.' : 'Как подключён этот роутер, найдено предположительно — проверь по коду.'}</b>
+          <div className="text-[12.5px] text-stone mt-1">{route.reason}</div>
+          <div className="text-[12px] text-mist mt-1">Поэтому до обработчика могут быть ещё шаги — например, проверка токена, — которых здесь нет. Цепочка ниже — только то, что точно видно в коде.</div>
+        </div>
+      )}
       {!sc.ordered && <div className="text-[12.5px] text-bronze mt-3">Порядок шагов приблизительный: разбор сделан прошлой версией. Нажми «Обновить код», чтобы увидеть точный порядок и условия.</div>}
       {sc.truncated && <div className="text-[12.5px] text-mist mt-3">Показаны первые {sc.steps.length} шагов. Уменьши глубину или начни сценарий с шага поглубже.</div>}
       {story?.summary && (
@@ -252,7 +260,7 @@ export function ScenarioView({ view, ix, id, method }) {
             <>
               <div className="mt-4 flex items-center gap-2 flex-wrap"><RoleChip role={step.role} /><h2 className="font-mono text-[17px] break-all">{step.label}</h2></div>
               {step.about && <div className="text-[13.5px] text-stone mt-2 leading-relaxed whitespace-pre-wrap">{step.about}</div>}
-              {step.role === 'request' && route && <div className="text-[13px] text-mist mt-2 leading-relaxed">Дальше по шагам — всё, через что пройдёт запрос: {route.chain.map((c) => ROLE_RU[c.role === 'handler' ? 'controller' : c.role]).join(' → ')}{route.errors?.length ? ', а при ошибке — обработчик ошибок' : ''}.</div>}
+              {step.role === 'request' && route && <div className="text-[13px] text-mist mt-2 leading-relaxed">{route.incomplete || route.guess ? 'Дальше по шагам — то, что точно видно в коде: ' : 'Дальше по шагам — всё, через что пройдёт запрос: '}{route.chain.map((c) => ROLE_RU[c.role === 'handler' ? 'controller' : c.role]).join(' → ')}{route.errors?.length ? ', а при ошибке — обработчик ошибок' : ''}.</div>}
             </>
           ) : (
             <>

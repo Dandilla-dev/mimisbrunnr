@@ -44,24 +44,33 @@ export function jsWeb(jsFiles, R, sites) {
   }
   for (const c of Object.values(containers)) c.mounts.sort((a, b) => a.line - b.line);
   const varInfo = (file, name) => jsFiles[file]?.web?.vars?.[name] || null;
+  // router.get('/', [auth, validate], handler) — список раскрываем в отдельные шаги
+  const flat = (hs) => hs.flatMap((h) => (h?.t === 'array' ? h.items : [h]));
 
   // имя обработчика → что это: роутер, плагин, функция проекта или внешний middleware
   function resolveRef(file, h) {
     if (!h) return null;
     if (h.t === 'inline') return h.id ? { id: h.id, label: '' } : null;
     if (h.t === 'name') {
-      if (varInfo(file, h.name)?.kind === 'router') return { container: `var:${file}:${h.name}` };
+      const own = varInfo(file, h.name);
+      if (own?.kind === 'router') return { container: `var:${file}:${h.name}` };
+      if (own?.kind === 'app' && own.fw === 'express') return { container: `var:${file}:${h.name}`, subapp: true }; // app.use('/admin', adminApp)
       const imp = jsFiles[file]?.imports[h.name];
       if (imp) {
         const tf = R.resolveSource(file, imp.source);
         if (tf) {
           const local = R.exportedLocal(tf, imp.name === '*' ? 'default' : imp.name);
-          if (local && varInfo(tf, local)?.kind === 'router') return { container: `var:${tf}:${local}` };
+          const v = local && varInfo(tf, local);
+          if (v?.kind === 'router') return { container: `var:${tf}:${local}` };
+          if (v?.kind === 'app' && v.fw === 'express') return { container: `var:${tf}:${local}`, subapp: true };
         }
       }
       const id = R.resolveName(file, null, h.name);
       if (id) return containers[`fn:${id}`] ? { container: `fn:${id}`, id } : { id, label: '' };
-      return { label: h.name, ext: true };
+      // импорт из npm-пакета (cors, helmet…) — известный внешний middleware;
+      // иначе это переменная цикла или параметр: что в ней, разбор не знает
+      if (imp) return { label: h.name, ext: true, about: known(h.name) };
+      return { label: h.name, unknown: true };
     }
     if (h.t === 'member') {
       const imp = jsFiles[file]?.imports[h.obj];
@@ -102,7 +111,8 @@ export function jsWeb(jsFiles, R, sites) {
 
   // ---- Express / Fastify: обход от приложения по use / register ----
   const reached = new Set();
-  function walkContainer(ck, prefix, before, errors, fw, depth = 0) {
+  const vague = []; // app.use(r), где r — неизвестно что (цикл, параметр): место для честной пометки
+  function walkContainer(ck, prefix, before, errors, fw, depth = 0, flags = null) {
     const c = containers[ck];
     if (!c || depth > 8 || reached.has(`${ck}@${prefix}`)) return;
     reached.add(`${ck}@${prefix}`);
@@ -122,12 +132,18 @@ export function jsWeb(jsFiles, R, sites) {
           hooks = m.handlers.filter((h) => h.t !== 'opts');
         }
         if (m.method === 'addHook') hooks = m.handlers;
-        for (const h of hooks) {
+        for (const h of flat(hooks)) {
           const ref = resolveRef(c.file, h);
           if (!ref) continue;
           if (ref.container) {
-            const rs = { role: 'router', id: ref.id || null, label: h.name || h.text || '', about: path ? `подключён по адресу ${joinPath(prefix, path)}` : 'подключён к приложению', file: c.file, line: m.line };
-            walkContainer(ref.container, joinPath(prefix, path), [...local, rs], errors, fw, depth + 1);
+            const what = ref.subapp ? 'вложенное приложение' : '';
+            const rs = { role: 'router', id: ref.id || null, label: h.name || h.text || '', about: `${what ? `${what}, ` : ''}${path ? `подключён по адресу ${joinPath(prefix, path)}` : 'подключён к приложению'}`, file: c.file, line: m.line };
+            walkContainer(ref.container, joinPath(prefix, path), [...local, rs], errors, fw, depth + 1, flags);
+            continue;
+          }
+          if (ref.unknown) {
+            vague.push({ file: c.file, line: m.line, text: m.text });
+            local.push({ role: 'unknown', id: null, label: ref.label, about: 'здесь подключается переменная, и что в ней — разбор не знает (например, роутер из цикла). Если это роутер, его маршруты показаны с пометкой «путь неполный».', file: c.file, line: m.line, under: path ? joinPath(prefix, path) : null });
             continue;
           }
           const p = ref.id ? params(ref.id) : null;
@@ -141,7 +157,7 @@ export function jsWeb(jsFiles, R, sites) {
         continue;
       }
       if (!m.routeId) continue;
-      const handlers = m.method === 'route' ? m.handlers : m.handlers.filter((h) => h.t !== 'opts');
+      const handlers = flat(m.method === 'route' ? m.handlers : m.handlers.filter((h) => h.t !== 'opts'));
       const opts = m.opts || m.handlers.find((h) => h.t === 'opts');
       const full = m.method === 'route'
         ? joinPath(prefix, (m.opts?.text?.match(/url\s*:\s*['"`]([^'"`]+)/) || [])[1] || '')
@@ -161,7 +177,7 @@ export function jsWeb(jsFiles, R, sites) {
         if (ref.id) roles[ref.id] ??= last ? 'controller' : role;
       });
       const method = (m.method === 'route' ? (m.opts?.text?.match(/method\s*:\s*['"`](\w+)/) || [])[1] || 'GET' : m.method).toUpperCase();
-      routes.push({ id: m.routeId, method, path: full, fw, file: c.file, line: m.line, chain, errors });
+      routes.push({ id: m.routeId, method, path: full, fw, file: c.file, line: m.line, chain, errors, ...(flags || {}) });
       roles[m.routeId] = 'route';
     }
   }
@@ -169,9 +185,14 @@ export function jsWeb(jsFiles, R, sites) {
     express: { role: 'error', id: null, label: 'встроенный обработчик Express', about: 'если ошибку никто не обработал — ответ 500 с текстом ошибки' },
     fastify: { role: 'error', id: null, label: 'встроенный обработчик Fastify', about: 'ошибка → ответ с её statusCode или 500; ошибка проверки по схеме → 400' },
   };
+  // приложения, которые сами подключены к другому (app.use('/admin', adminApp)), — не корни
+  const mounted = new Set();
+  for (const c of Object.values(containers)) {
+    for (const m of c.mounts) if (m.method === 'use') for (const h of flat(m.handlers)) { const r = h && resolveRef(c.file, h); if (r?.subapp) mounted.add(r.container); }
+  }
   for (const [file, facts] of Object.entries(jsFiles)) {
     for (const [name, v] of Object.entries(facts.web?.vars || {})) {
-      if (v.kind !== 'app' || v.fw === 'nest') continue;
+      if (v.kind !== 'app' || v.fw === 'nest' || mounted.has(`var:${file}:${name}`)) continue;
       const errors = [];
       walkContainer(`var:${file}:${name}`, '', [], errors, v.fw);
       if (BUILTIN[v.fw]) errors.push(BUILTIN[v.fw]);
@@ -182,7 +203,13 @@ export function jsWeb(jsFiles, R, sites) {
     if ([...reached].some((r) => r.startsWith(`${ck}@`))) continue;
     if (!c.mounts.some((m) => m.routeId)) continue;
     const fw = ck.startsWith('var:') ? varInfo(c.file, ck.split(':').pop())?.fw || 'express' : 'fastify';
-    walkContainer(ck, '', [], [], fw);
+    const where = vague.map((x) => `${x.file}:${x.line} (${x.text})`);
+    walkContainer(ck, '', [], [], fw, 0, {
+      incomplete: true,
+      reason: where.length
+        ? `Возможно, он подключается здесь: ${where.join('; ')} — но что именно там подключается, по коду не понять.`
+        : 'В коде не нашлось места, где этот роутер подключается к приложению.',
+    });
   }
 
   // ---- NestJS ----
@@ -204,6 +231,7 @@ export function jsWeb(jsFiles, R, sites) {
       }
     }
   }
+  const nestApp = Object.values(jsFiles).some((f) => Object.values(f.web?.vars || {}).some((v) => v.fw === 'nest'));
   const methodOf = (ref, m) => {
     if (!ref?.id) return ref;
     const cls = ref.id;
@@ -230,7 +258,7 @@ export function jsWeb(jsFiles, R, sites) {
         roles[m.id] = 'controller';
         const errors = [...res(m.filters), ...res(ctl.filters), ...globals.filters].map((x) => step('error', methodOf(x, 'catch'), { label: x.label || x.text }));
         errors.push({ role: 'error', id: null, label: 'встроенный обработчик ошибок Nest', about: 'HttpException → ответ с её кодом, остальные ошибки → 500' });
-        routes.push({ id: m.id, method: m.http, path: joinPath(globals.prefix, ctl.prefix, m.path), fw: 'nest', file, line: m.line, chain, errors });
+        routes.push({ id: m.id, method: m.http, path: joinPath(globals.prefix, ctl.prefix, m.path), fw: 'nest', file, line: m.line, chain, errors, ...(nestApp ? {} : { incomplete: true, reason: 'Не нашлось main.ts с NestFactory.create: глобальные guard\'ы, pipe\'ы, middleware и префикс адреса не видны.' }) });
       }
     }
     for (const n of facts.web?.nest || []) if (n.role !== 'controller') roles[n.id] ??= n.role === 'guard' ? 'auth' : n.role === 'pipe' ? 'validate' : n.role === 'filter' ? 'error' : n.role === 'provider' ? 'service' : 'middleware';
