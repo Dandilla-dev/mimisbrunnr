@@ -1,7 +1,7 @@
 // Настройки: имя, подключение ИИ, бюджет, токен GitHub.
 import { useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { saveSettings, toast } from '../app/store';
+import { saveSettings, setGpuFlag, toast } from '../app/store';
 
 function Row({ label, hint, children }) {
   return (
@@ -26,7 +26,7 @@ function Section({ title, children }) {
 
 export default function SettingsScreen() {
   const dispatch = useDispatch();
-  const { settings, presets, dataDir, version } = useSelector((s) => s.app);
+  const { settings, presets, dataDir, logFile, gpuOff, gpuFlagSet, version } = useSelector((s) => s.app);
   const [name, setName] = useState(settings.name);
   const [prov, setProv] = useState(settings.provider);
   const [key, setKey] = useState('');
@@ -142,6 +142,18 @@ export default function SettingsScreen() {
           <Section title="Данные">
             <Row label="Где хранятся разборы и настройки" hint="Удаление этой папки сотрёт все разборы.">
               <code className="font-mono text-[12px] text-mist break-all">{dataDir}</code>
+            </Row>
+            <Row label="Журнал ошибок" hint="Если окно зависло или почернело — пришлите этот файл, по нему видно, что случилось.">
+              <code className="font-mono text-[12px] text-mist break-all">{logFile}</code>
+            </Row>
+          </Section>
+          <Section title="Экран">
+            <Row label="Рисовать без видеокарты" hint="Включите, если окно иногда становится чёрным (бывает на Linux с Wayland и мониторами с разным масштабом). Работает после перезапуска приложения.">
+              <label className="flex items-center gap-2 text-[13.5px] cursor-pointer w-fit" htmlFor="gpu-off">
+                <input id="gpu-off" type="checkbox" className="accent-[#B98D55]" checked={gpuFlagSet}
+                  onChange={async (e) => { const set = await window.mimis.setGpu(!e.target.checked); dispatch(setGpuFlag(set)); dispatch(toast('Изменится после перезапуска приложения.')); }} />
+                {gpuOff ? 'Сейчас окно рисуется без видеокарты' : 'Сейчас окно рисуется видеокартой'}
+              </label>
             </Row>
           </Section>
         </div>

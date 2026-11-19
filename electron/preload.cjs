@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('mimis', {
   estimateStory: (id, entry, depth) => call('story:estimate', id, entry, depth),
   runStory: (id, entry, depth) => call('story:run', id, entry, depth),
   testAi: () => call('ai:test'),
+  logError: (text) => ipcRenderer.send('log:error', String(text).slice(0, 20000)),
+  setGpu: (on) => call('gpu:set', on),
   pickFolder: () => call('dialog:folder'),
   openExternal: (url) => call('open:external', url),
   onProgress: (fn) => on('progress', fn),

@@ -33,7 +33,7 @@ function pathOf(section) {
  * edges: [{ id, source, target, label?, weight?, dashed? }] — dashed: функция передаётся, а не вызывается
  */
 export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420, onNodeClick, onEdgeClick, selectedEdge, emptyText = 'Связей нет.' }) {
-  const [layout, setLayout] = useState(null);
+  const [laid, setLaid] = useState(null); // { key, res } — раскладка и то, для какой схемы она посчитана
   const [err, setErr] = useState(null);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const [expanded, setExpanded] = useState(false);
@@ -41,7 +41,10 @@ export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420,
   const box = useRef(null);
   const drag = useRef(null);
 
-  const key = useMemo(() => JSON.stringify([nodes.map((n) => [n.id, n.label, n.sub]), edges.map((e) => [e.source, e.target, e.label]), direction]), [nodes, edges, direction]);
+  const key = useMemo(() => JSON.stringify([nodes.map((n) => [n.id, n.label, n.sub]), edges.map((e) => [e.id, e.source, e.target, e.label]), direction]), [nodes, edges, direction]);
+  // Раскладка считается асинхронно. Пока считается новая, старую не рисуем: в ней другие
+  // блоки и стрелки (раньше из-за этого падал весь интерфейс при быстрой смене схемы).
+  const layout = laid && laid.key === key ? laid.res : null;
 
   useEffect(() => {
     let alive = true;
@@ -65,7 +68,8 @@ export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420,
         labels: e.label ? [{ text: e.label, width: String(e.label).length * 7 + 10, height: 16 }] : [],
       })),
     };
-    elk.layout(graph).then((res) => { if (alive) setLayout(res); }).catch((e) => { if (alive) setErr(e.message || String(e)); });
+    setHover(null);
+    elk.layout(graph).then((res) => { if (alive) setLaid({ key, res }); }).catch((e) => { if (alive) setErr(e.message || String(e)); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
@@ -118,6 +122,7 @@ export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420,
   };
 
   const byId = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
+  const edgeById = useMemo(() => Object.fromEntries(edges.map((e) => [e.id, e])), [edges]);
   const maxW = Math.max(1, ...edges.map((e) => e.weight || 1));
   const related = (id) => hover && (id === hover || edges.some((e) => (e.source === hover && e.target === id) || (e.target === hover && e.source === id)));
 
@@ -144,7 +149,8 @@ export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420,
               </defs>
               <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
                 {layout.edges.map((e) => {
-                  const src = edges.find((x) => x.id === e.id);
+                  const src = edgeById[e.id];
+                  if (!src) return null;
                   const on = selectedEdge === e.id || (hover && (src.source === hover || src.target === hover));
                   const dim = hover && !on;
                   const w = 1.2 + 2.4 * ((src.weight || 1) / maxW);
@@ -167,6 +173,7 @@ export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420,
                 })}
                 {layout.children.map((c) => {
                   const n = byId[c.id];
+                  if (!n) return null;
                   const center = n.emphasis === 'center';
                   const ghost = n.emphasis === 'ghost';
                   const dim = hover && !related(c.id);

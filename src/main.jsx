@@ -13,6 +13,11 @@ import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/500.css';
 import './styles/index.css';
 
+// любые необработанные ошибки окна — в журнал приложения
+const log = (m) => { try { window.mimis?.logError?.(String(m)); } catch { /* */ } };
+window.addEventListener('error', (e) => log(e.error?.stack || e.message));
+window.addEventListener('unhandledrejection', (e) => log(e.reason?.stack || e.reason));
+
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <Provider store={store}>

@@ -7,6 +7,7 @@ import WelcomeScreen from './features/WelcomeScreen';
 import HomeScreen from './features/HomeScreen';
 import SettingsScreen from './features/SettingsScreen';
 import SessionScreen from './features/session/SessionScreen';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function NavRail() {
   const dispatch = useDispatch();
@@ -89,7 +90,7 @@ export default function App() {
       <GreenGlow />
       <NordicPatternLayer opacity={0.07} />
       {ready && screen !== 'welcome' && <NavRail />}
-      {body}
+      <ErrorBoundary resetKey={screen} onBack={() => dispatch(setScreen('home'))}>{body}</ErrorBoundary>
       <Toasts />
     </div>
   );

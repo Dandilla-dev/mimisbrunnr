@@ -36,9 +36,10 @@ export const deleteSession = createAsyncThunk('session/delete', async (id, { dis
 let toastId = 0;
 const appSlice = createSlice({
   name: 'app',
-  initialState: { ready: false, settings: null, presets: [], sessions: [], screen: 'home', dataDir: '', version: '', toasts: [], loading: null, error: null },
+  initialState: { ready: false, settings: null, presets: [], sessions: [], screen: 'home', dataDir: '', logFile: '', gpuOff: false, gpuFlagSet: false, version: '', toasts: [], loading: null, error: null },
   reducers: {
     setScreen(s, a) { s.screen = a.payload; },
+    setGpuFlag(s, a) { s.gpuFlagSet = a.payload; },
     progress(s, a) { s.loading = a.payload; },
     toast: {
       reducer(s, a) { s.toasts.push(a.payload); },
@@ -48,7 +49,7 @@ const appSlice = createSlice({
   },
   extraReducers: (b) => {
     b.addCase(loadState.fulfilled, (s, a) => {
-      Object.assign(s, { ready: true, settings: a.payload.settings, presets: a.payload.presets, sessions: a.payload.sessions, dataDir: a.payload.dataDir, version: a.payload.version });
+      Object.assign(s, { ready: true, settings: a.payload.settings, presets: a.payload.presets, sessions: a.payload.sessions, dataDir: a.payload.dataDir, logFile: a.payload.logFile, gpuOff: a.payload.gpuOff, gpuFlagSet: a.payload.gpuFlagSet, version: a.payload.version });
       s.screen = a.payload.settings.name ? 'home' : 'welcome';
     });
     b.addCase(loadState.rejected, (s, a) => { s.ready = true; s.error = a.error.message; });
@@ -97,7 +98,7 @@ const sessionSlice = createSlice({
   },
 });
 
-export const { setScreen, progress, toast, dismissToast } = appSlice.actions;
+export const { setScreen, setGpuFlag, progress, toast, dismissToast } = appSlice.actions;
 export const { go, back, home, job, clearJob } = sessionSlice.actions;
 
 export const store = configureStore({ reducer: { app: appSlice.reducer, session: sessionSlice.reducer } });

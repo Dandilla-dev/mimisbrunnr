@@ -13,6 +13,38 @@ let core = null;
 // для автотестов: отдельная папка данных
 if (process.env.MIMIS_USER_DATA) app.setPath('userData', process.env.MIMIS_USER_DATA);
 
+// ---- журнал: userData/logs/mimisbrunnr.log (последние ~1 МБ) ----
+const logDir = path.join(app.getPath('userData'), 'logs');
+const logFile = path.join(logDir, 'mimisbrunnr.log');
+function log(...parts) {
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+    if (fs.existsSync(logFile) && fs.statSync(logFile).size > 1_000_000) fs.renameSync(logFile, `${logFile}.old`);
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${parts.map((p) => (p instanceof Error ? p.stack : typeof p === 'string' ? p : JSON.stringify(p))).join(' ')}\n`);
+  } catch { /* журнал не обязателен */ }
+}
+process.on('uncaughtException', (e) => log('main: uncaughtException', e));
+process.on('unhandledRejection', (e) => log('main: unhandledRejection', e));
+
+// ---- видеокарта ----
+// На некоторых связках Linux + Wayland (в том числе COSMIC) и при мониторах с разным
+// масштабом окно Chromium может стать чёрным. Тогда помогает рисовать без видеокарты.
+// Флаг ставится в настройках или сам — после повторных сбоев видеопроцесса.
+const gpuFlag = path.join(app.getPath('userData'), 'gpu-off');
+const gpuOff = fs.existsSync(gpuFlag) || process.env.MIMIS_NO_GPU === '1';
+if (gpuOff) app.disableHardwareAcceleration();
+let gpuCrashes = 0;
+app.on('child-process-gone', (_e, d) => {
+  log('child-process-gone', d);
+  if (d.type === 'GPU' && d.reason !== 'clean-exit') {
+    gpuCrashes += 1;
+    if (gpuCrashes >= 2 && !gpuOff) {
+      try { fs.writeFileSync(gpuFlag, 'после сбоев видеопроцесса\n'); } catch { /* */ }
+      log('gpu: видеопроцесс падал несколько раз — со следующего запуска рисую без видеокарты');
+    }
+  }
+});
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1320, height: 860, minWidth: 900, minHeight: 600,
@@ -29,6 +61,14 @@ function createWindow() {
     },
   });
   win.once('ready-to-show', () => win.show());
+  // окно упало или зависло — пишем в журнал и поднимаем заново, а не оставляем чёрным
+  win.webContents.on('render-process-gone', (_e, d) => {
+    log('render-process-gone', d);
+    if (d.reason !== 'clean-exit' && win && !win.isDestroyed()) setTimeout(() => { if (!win.isDestroyed()) win.webContents.reload(); }, 500);
+  });
+  win.on('unresponsive', () => log('window: unresponsive'));
+  win.on('responsive', () => log('window: responsive again'));
+  win.webContents.on('preload-error', (_e, p, err) => log('preload-error', p, err));
   // Внешние ссылки — только в системный браузер, и только http(s).
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url);
@@ -66,9 +106,13 @@ app.whenReady().then(() => {
     },
     // net.fetch идёт через сетевой стек Chromium: учитывает системный прокси.
     fetchFn: (url, opts) => net.fetch(url, opts),
+    log,
   });
 
-  handle('state', () => ({ ...core.state(), dataDir: path.join(app.getPath('userData'), 'data'), version: app.getVersion() }));
+  handle('state', () => ({ ...core.state(), dataDir: path.join(app.getPath('userData'), 'data'), logFile, gpuOff, gpuFlagSet: fs.existsSync(gpuFlag), version: app.getVersion() }));
+  handle('gpu:set', (on) => { if (on) fs.rmSync(gpuFlag, { force: true }); else fs.writeFileSync(gpuFlag, 'выключено в настройках\n'); return fs.existsSync(gpuFlag); });
+  ipcMain.on('log:error', (_e, text) => log('window:', text));
+  log(`start ${app.getVersion()} · ${process.platform} · ${process.env.XDG_SESSION_TYPE || ''} ${process.env.XDG_CURRENT_DESKTOP || ''} · gpu ${gpuOff ? 'off' : 'on'}`);
   handle('settings:update', (patch) => core.updateSettings(patch));
   handle('sessions:list', () => core.listSessions());
   handle('sessions:create', (input) => core.createSession(input, (m) => send('progress', { kind: 'load', message: m })));

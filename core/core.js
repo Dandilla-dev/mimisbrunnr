@@ -2,13 +2,26 @@
 // Electron (electron/main.js) только пробрасывает эти методы в окно.
 import { Settings, Sessions } from './store.js';
 import { fetchTarget, parseTarget } from './fetchRepo.js';
+import { Worker } from 'node:worker_threads';
 import { analyzeSources, layersByFolder } from './analyze.js';
+
+// Разбор кода — в отдельном потоке, чтобы окно не замирало на больших репозиториях.
+// Если поток запустить не удалось (необычная сборка), разбираем здесь же.
+function analyzeOffThread(sources) {
+  return new Promise((resolve, reject) => {
+    let w;
+    try { w = new Worker(new URL('./analyzeWorker.js', import.meta.url), { workerData: { sources } }); } catch (e) { reject(Object.assign(e, { noWorker: true })); return; }
+    w.once('message', (m) => { w.terminate(); if (m.ok) resolve(m.r); else reject(new Error(m.error)); });
+    w.once('error', (e) => reject(Object.assign(e, { noWorker: true })));
+  });
+}
 import { plan, runExplain } from './explain.js';
 import { callModel, PRESETS, costOf } from './llm.js';
 import { storyPlan, runStory } from './story.js';
 
 export class MimisCore {
-  constructor(dataDir, { crypt = null, fetchFn = fetch } = {}) {
+  constructor(dataDir, { crypt = null, fetchFn = fetch, log = () => {} } = {}) {
+    this.log = log;
     this.settings = new Settings(dataDir, crypt);
     this.sessions = new Sessions(dataDir);
     this.fetchFn = fetchFn;
@@ -23,7 +36,14 @@ export class MimisCore {
     const fetched = await fetchTarget(target, { fetchFn: this.fetchFn, token: this.settings.githubToken(), onProgress });
     if (!fetched.files.length) throw new Error('Не нашёл в репозитории файлов Python или JavaScript/TypeScript.');
     onProgress(`Разбираю ${fetched.files.length} файлов…`);
-    const analysis = await analyzeSources(fetched.files);
+    const t0 = Date.now();
+    let analysis;
+    try { analysis = process.env.MIMIS_NO_WORKER === '1' ? await analyzeSources(fetched.files) : await analyzeOffThread(fetched.files); } catch (e) {
+      if (!e.noWorker) throw e;
+      this.log('analyze: отдельный поток не запустился, разбираю в основном', e);
+      analysis = await analyzeSources(fetched.files);
+    }
+    this.log(`analyze: ${fetched.files.length} файлов за ${Date.now() - t0} мс`);
     return { fetched, analysis };
   }
 

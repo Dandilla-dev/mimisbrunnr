@@ -7,6 +7,7 @@ import CodeView from '../../components/CodeView';
 import { BackIcon, SparkIcon, CodeIcon, PathIcon } from '../../components/icons';
 import { ScenarioList, ScenarioView } from './Scenarios';
 import { useCode } from './useCode';
+import ErrorBoundary from '../../components/ErrorBoundary';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
 import { ProjectDiagram, LayerDiagram, FnDiagram } from './Diagrams';
@@ -359,6 +360,8 @@ function Terms({ view }) {
 }
 
 export default function Panel({ view, ix, onExplain }) {
+  const dispatch = useDispatch();
+  const depth = useSelector((s) => s.session.stack.length);
   const top = useSelector((s) => s.session.stack[s.session.stack.length - 1]);
   let body;
   if (top.t === 'layer') body = <LayerView view={view} ix={ix} id={top.id} />;
@@ -372,7 +375,7 @@ export default function Panel({ view, ix, onExplain }) {
   return (
     <main className="flex-1 min-w-0 overflow-y-auto scroll-thin px-8 py-6">
       <Crumbs view={view} ix={ix} />
-      {body}
+      <ErrorBoundary resetKey={`${depth}:${JSON.stringify(top)}`} onBack={() => dispatch(back())}>{body}</ErrorBoundary>
     </main>
   );
 }
