@@ -12,3 +12,11 @@ export class Counter {
     this.value = 0;
   }
 }
+
+export class StepCounter extends Counter {
+  incrementTwice() {
+    this.increment();
+    this.increment();
+    super.reset();
+  }
+}

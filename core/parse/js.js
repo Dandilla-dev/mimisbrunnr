@@ -5,6 +5,7 @@ import path from 'node:path';
 import { parse, field, walk, codeHash, headText, collapse } from './treesitter.js';
 import { decoratorsOf, entityFromDefine, entityFromMongoose, entityFromClass, jsExtras } from './js_extras.js';
 import { jsWeb, ORM_INSTANCE } from './js_web.js';
+import { GUESS_STOP } from './python.js';
 
 const FUNC = new Set(['arrow_function', 'function_expression', 'function', 'generator_function']);
 const JSX = new Set(['jsx_element', 'jsx_self_closing_element', 'jsx_fragment']);
@@ -388,6 +389,15 @@ function collectFacts(root, ranges, stem) {
   // и тип результата — чтобы узнать, чей метод вызывается: s = new Store(); s.add().
   const rangeAt = new Map(ranges.map((r) => [`${r.start}:${r.end}`, r]));
   const sites = []; // { from, line, kind, ctx, target }
+  const dicts = {}; // функция | '' → { имя объекта → [функции-значения] } — для handlers[kind](...)
+  const classBases = {}; // класс → родитель (class Admin extends User)
+  for (const c of walk(root)) {
+    if (c.type !== 'class_declaration' && c.type !== 'class') continue;
+    const h = c.namedChildren.find((x) => x.type === 'class_heritage');
+    const ext = h && (h.namedChildren.find((x) => x.type === 'extends_clause')?.namedChild(0) || h.namedChild(0));
+    const nm = field(c, 'name')?.text;
+    if (nm && ext && (ext.type === 'identifier' || ext.type === 'member_expression')) classBases[nm] = ext.text.split('.').pop();
+  }
   const aliases = {}; // короткое имя → полное имя в этом файле (см. createSlice actions)
   const locals = {}; // id функции | '' (уровень файла) → { имя: spec }
   const fnInfo = {}; // id → { retAnn, ret }
@@ -407,6 +417,7 @@ function collectFacts(root, ranges, stem) {
     if (n.type === 'member_expression') {
       const o = field(n, 'object'), p = field(n, 'property')?.text;
       if (o?.type === 'this') return { t: 'this', name: p };
+      if (o?.type === 'super') return { t: 'super', name: p };
       return { t: 'member', obj: o?.type === 'identifier' ? o.text : null, objSpec: jsSpec(o), name: p, text: n.text.length < 80 ? n.text : '' };
     }
     return null;
@@ -422,6 +433,8 @@ function collectFacts(root, ranges, stem) {
         const f = field(n, 'function') || field(n, 'constructor');
         const ref = f && refOf(f);
         if (ref) add(n, owner, ctx, 'call', ref);
+        // handlers[kind](data) — вызывается одна из функций объекта
+        if (f?.type === 'subscript_expression' && field(f, 'object')?.type === 'identifier') add(n, owner, ctx, 'dispatch', { t: 'dict', name: field(f, 'object').text, text: f.text.length < 60 ? f.text : '' });
         if (f && f.type === 'member_expression') v(field(f, 'object'), ctx, owner);
         else if (f && !ref) v(f, ctx, owner);
         const label = `${short(f?.text || '', 28)}(…)`;
@@ -456,6 +469,10 @@ function collectFacts(root, ranges, stem) {
       }
       case 'variable_declarator': {
         const nm = field(n, 'name'), typ = field(n, 'type'), val = field(n, 'value');
+        if (nm?.type === 'identifier' && val?.type === 'object') {
+          (dicts[owner || ''] ||= {})[nm.text] = val.namedChildren.map((p) => (p.type === 'pair' ? field(p, 'value') : p.type === 'shorthand_property_identifier' ? p : null))
+            .filter((x) => x && (x.type === 'identifier' || x.type === 'shorthand_property_identifier' || x.type === 'member_expression')).map((x) => (x.type === 'member_expression' ? refOf(x) : { t: 'name', name: x.text }));
+        }
         // const { addItem } = cartSlice.actions → addItem это редьюсер cartSlice.addItem
         if (nm?.type === 'object_pattern' && val?.type === 'member_expression' && field(val, 'property')?.text === 'actions' && field(val, 'object')?.type === 'identifier') {
           for (const p of nm.namedChildren) if (p.type === 'shorthand_property_identifier_pattern') aliases[p.text] = `${field(val, 'object').text}.${p.text}`;
@@ -549,7 +566,7 @@ function collectFacts(root, ranges, stem) {
   }
   v(root, [], null);
   for (const [k, full] of Object.entries(aliases)) if (exportsMap[k] === k) exportsMap[k] = full;
-  return { imports, exportsMap, sites, locals, fnInfo, classAttrs, parentOf, aliases };
+  return { imports, exportsMap, sites, locals, fnInfo, classAttrs, parentOf, aliases, dicts, classBases };
 }
 
 // выражение → простое описание для вывода типа
@@ -618,11 +635,23 @@ export function jsSites(jsFiles, itemsByFile, kinds, extraEntities = []) {
     if (imp) { const tf = resolveSource(file, imp.source); if (tf) return exported(tf, imp.name === '*' ? 'default' : imp.name); }
     return null;
   }
-  const classMethod = (clsId, m) => {
-    if (!clsId) return null;
+  // метод класса — или унаследованный: class Admin extends User, admin.canEdit() → User.canEdit
+  const inherited = {};
+  const classMethod = (clsId, m, depth = 0) => {
+    if (!clsId || depth > 6) return null;
     const [f, cls] = clsId.split('::');
-    return byName[f]?.[`${cls}.${m}`] || null;
+    const own = byName[f]?.[`${cls}.${m}`];
+    if (own) return own;
+    const base = jsFiles[f]?.classBases?.[cls];
+    const baseId = base && resolveName(f, null, base);
+    if (!baseId || baseId === clsId) return null;
+    const found = classMethod(baseId, m, depth + 1);
+    if (found) inherited[`${clsId}|${m}`] = baseId.split('::')[1];
+    return found;
   };
+  // у какого класса проекта есть метод с таким именем — для догадки, когда тип неизвестен
+  const methodOwners = {};
+  for (const items of Object.values(itemsByFile)) for (const it of items) if (it.kind === 'method' && /^[A-Z]/.test(it.name)) { const [c, mm] = it.name.split('.'); if (mm && mm !== 'constructor') (methodOwners[mm] ||= new Set()).add(it.id.split('::')[0] + '::' + c); }
   const isClass = (id) => id && (kinds.get(id) === 'class' || kinds.get(id) === 'entity');
   function annType(file, owner, text) {
     if (!text) return null;
@@ -742,10 +771,25 @@ export function jsSites(jsFiles, itemsByFile, kinds, extraEntities = []) {
     for (const s of facts.sites) {
       const r = s.target;
       let tgt = null, label = '';
+      let kind = s.kind;
+      if (r.t === 'dict') {
+        // handlers[kind](...) — связь с каждой функцией объекта: «вызывается одна из»
+        let vals = null;
+        for (let o = s.from; ; o = facts.parentOf[o] || '') { if (facts.dicts?.[o]?.[r.name]) { vals = facts.dicts[o][r.name]; break; } if (!o) break; }
+        for (const v of vals || []) {
+          const id = v.t === 'name' ? resolveName(file, s.from, v.name) : v.t === 'this' ? names[`${nameOf(s.from).split('.')[0]}.${v.name}`] : null;
+          if (id && id !== s.from && kinds.has(id)) out.push({ src: s.from, tgt: id, line: s.line, kind: 'dispatch', ctx: s.ctx, label: r.text || `${r.name}[…]` });
+        }
+        continue;
+      }
       if (r.t === 'name') tgt = resolveName(file, s.from, r.name);
-      else if (r.t === 'this') {
+      else if (r.t === 'this' || r.t === 'super') {
         const cls = nameOf(s.from).split('.')[0];
-        tgt = names[`${cls}.${r.name}`] || null;
+        const clsId = names[cls];
+        if (r.t === 'this') tgt = names[`${cls}.${r.name}`] || classMethod(clsId, r.name);
+        else { const b = facts.classBases?.[cls]; tgt = classMethod(b && resolveName(file, null, b), r.name); } // super.method()
+        if (tgt && clsId && inherited[`${clsId}|${r.name}`]) label = `унаследован от ${inherited[`${clsId}|${r.name}`]}`;
+        if (r.t === 'super' && tgt) label = `super — метод родителя`;
       } else if (r.t === 'member') {
         const imp = r.obj ? facts.imports[r.obj] : null;
         if (imp) {
@@ -760,12 +804,20 @@ export function jsSites(jsFiles, itemsByFile, kinds, extraEntities = []) {
           else if (t && kinds.get(t) === 'entity') {
             const rel = assocOf(t, r.name);
             tgt = rel?.to || t; label = r.text || `${r.obj || '…'}.${r.name}`; // book.setAuthors(...) — через связь
-          } else tgt = classMethod(t, r.name);
+          } else {
+            tgt = classMethod(t, r.name);
+            if (tgt && t && inherited[`${t}|${r.name}`]) label = `унаследован от ${inherited[`${t}|${r.name}`]}`;
+            // тип объекта неизвестен, но метод с таким именем есть ровно у одного класса — догадка
+            if (!tgt && !t && s.kind === 'call' && !GUESS_STOP.has(r.name) && !(r.obj && facts.imports[r.obj])) {
+              const owners = [...(methodOwners[r.name] || [])];
+              if (owners.length === 1) { tgt = classMethod(owners[0], r.name); kind = 'guess'; label = `тип не записан — похоже на ${owners[0].split('::')[1]}`; }
+            }
+          }
         }
       }
       if (!tgt || tgt === s.from || !kinds.has(tgt)) continue;
       if (s.kind === 'ref' && kinds.get(tgt) === 'class') continue;
-      out.push({ src: s.from, tgt, line: s.line, kind: s.kind, ctx: s.ctx, label });
+      out.push({ src: s.from, tgt, line: s.line, kind, ctx: s.ctx, label });
     }
   }
   const resolver = { resolveName, resolveSource, exported, exportedLocal, classMethod, byName, kinds, annType };

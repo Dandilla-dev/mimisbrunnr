@@ -10,6 +10,7 @@ import { useCode } from './useCode';
 import Inside from './Inside';
 import { EntitiesView, EntityInfo } from './Entities';
 import ErrorBoundary from '../../components/ErrorBoundary';
+import { linkOf } from './linkKinds';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
 import { ProjectDiagram, LayerDiagram, FnDiagram } from './Diagrams';
@@ -24,14 +25,15 @@ export const KindTag = ({ kind }) => (
   <span className="font-mono text-[9.5px] uppercase tracking-wide text-mist-dim border border-hairline rounded px-1.5 py-[1px]">{KIND_RU[kind] || kind}</span>
 );
 
-function FnLink({ ix, id, passed }) {
+function FnLink({ ix, id, kind, note }) {
   const dispatch = useDispatch();
   const it = ix.itemById[id];
   if (!it) return null;
+  const lk = linkOf(kind);
   return (
-    <button onClick={() => dispatch(go({ t: 'fn', id }))} className={`font-mono text-[12px] px-2 py-1 rounded-md border bg-panel-2 hover:border-bronze hover:text-bronze transition-colors text-left ${passed ? 'border-dashed border-mist-dim' : 'border-hairline'}`}
-      title={passed ? 'Не вызывается напрямую, а передаётся (в onClick, аргументом, в список) — вызовется позже' : undefined}>
-      {it.name}<span className="text-mist-dim"> · {it.file.split('/').pop()}{passed ? ' · передаётся' : ''}</span>
+    <button onClick={() => dispatch(go({ t: 'fn', id }))} className={`font-mono text-[12px] px-2 py-1 rounded-md border bg-panel-2 hover:border-bronze hover:text-bronze transition-colors text-left ${lk.border}`}
+      title={[lk.title, note].filter(Boolean).join(' ') || undefined}>
+      {it.name}<span className="text-mist-dim"> · {it.file.split('/').pop()}{lk.short ? ` · ${lk.short}` : ''}{note ? ` · ${note}` : ''}</span>
     </button>
   );
 }
@@ -258,7 +260,10 @@ function FnView({ view, ix, id, onExplain }) {
     dispatch(toast('Пояснение отмечено как актуальное'));
   }
 
-  const links = (arr, kindOf) => (arr.length ? <div className="flex flex-wrap gap-1.5">{arr.map((x) => <FnLink key={x} ix={ix} id={x} passed={kindOf(x) === 'ref'} />)}</div> : <div className="text-[13px] text-mist-dim">Нет в коде проекта.</div>);
+  // «унаследован от User» и «тип не записан — похоже на Mailer» — подписи мест вызова
+  const noteOf = (a, b) => (view.sites || []).find(([x, y, , , , l]) => x === a && y === b && /унаследован|похоже|super/.test(l || ''))?.[5] || '';
+  const links = (arr, kindOf, noteFor) => (arr.length ? <div className="flex flex-wrap gap-1.5">{arr.map((x) => <FnLink key={x} ix={ix} id={x} kind={kindOf(x)} note={noteFor(x)} />)}</div> : <div className="text-[13px] text-mist-dim">Нет в коде проекта.</div>);
+  const kindsHere = new Set([...callers.map((x) => ix.edgeKind[`${x}>${id}`]), ...calls.map((x) => ix.edgeKind[`${id}>${x}`])]);
 
   return (
     <div>
@@ -307,8 +312,14 @@ function FnView({ view, ix, id, onExplain }) {
               {!ent && it.kind !== 'class' && <Sec n="3" title="Что внутри: данные и переменные"><Inside view={view} it={it} onMark={markLines} /></Sec>}
               <Sec n="4" title="Связи">
                 <FnDiagram view={view} ix={ix} id={id} />
-                <div className="text-[12px] text-mist mb-1.5 mt-4">Кто вызывает</div>{links(callers, (x) => ix.edgeKind[`${x}>${id}`])}
-                <div className="text-[12px] text-mist mb-1.5 mt-3">Кого вызывает</div>{links(calls, (x) => ix.edgeKind[`${id}>${x}`])}
+                <div className="text-[12px] text-mist mb-1.5 mt-4">Кто вызывает</div>{links(callers, (x) => ix.edgeKind[`${x}>${id}`], (x) => noteOf(x, id))}
+                <div className="text-[12px] text-mist mb-1.5 mt-3">Кого вызывает</div>{links(calls, (x) => ix.edgeKind[`${id}>${x}`], (x) => noteOf(id, x))}
+                {[...callers.map((x) => noteOf(x, id)), ...calls.map((x) => noteOf(id, x))].some((n) => /унаследован|super/.test(n)) && (
+                  <div className="text-[12.5px] text-mist mt-2 leading-relaxed"><b className="text-stone">«унаследован»</b> — метод объявлен не в самом классе, а в его родителе. Например, <span className="font-mono">class Admin(User)</span> или <span className="font-mono">class Admin extends User</span>: Admin получает все методы User, и вызов <span className="font-mono">admin.can_edit()</span> на самом деле выполняет код из User.</div>
+                )}
+                {['ref', 'dispatch', 'guess'].filter((k) => kindsHere.has(k)).map((k) => (
+                  <div key={k} className="text-[12.5px] text-mist mt-2 leading-relaxed"><b className="text-stone">«{linkOf(k).short}»</b> — {linkOf(k).title}</div>
+                ))}
                 {calls.length > 0 && (
                   <button className="btn mt-4" onClick={() => dispatch(go({ t: 'scenario', id }))}><PathIcon className="w-4 h-4" />Пройти сценарий отсюда</button>
                 )}

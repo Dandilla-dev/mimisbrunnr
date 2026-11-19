@@ -103,7 +103,7 @@ function exprSpec(n) {
 const COMPREHENSIONS = new Set(['list_comprehension', 'set_comprehension', 'dictionary_comprehension', 'generator_expression']);
 
 function scanFunction(def, cls) {
-  const fn = { cls, params: {}, locals: {}, retAnn: field(def, 'return_type')?.text || null, ret: null, yields: null, sites: [] };
+  const fn = { cls, params: {}, locals: {}, dicts: {}, retAnn: field(def, 'return_type')?.text || null, ret: null, yields: null, sites: [] };
   const bind = (name, spec) => { fn.names.push(name); if (spec && !(name in fn.locals)) fn.locals[name] = spec; };
   const site = (node, kind, target, ctx) => fn.sites.push({ line: node.startPosition.row + 1, kind, target, ctx: ctx.slice(-2).join(' › ') });
 
@@ -135,7 +135,19 @@ function scanFunction(def, cls) {
       case 'call': {
         const f = field(n, 'function');
         if (f?.type === 'identifier') site(n, 'call', { t: 'name', name: f.text }, ctx);
-        else if (f?.type === 'attribute') {
+        else if (f?.type === 'subscript' && field(f, 'value')?.type === 'identifier') {
+          // handlers[kind](data) — вызывается одна из функций словаря
+          site(n, 'dispatch', { t: 'dict', name: field(f, 'value').text, text: f.text.length < 60 ? f.text : '' }, ctx);
+        } else if (f?.type === 'call' && field(f, 'function')?.text === 'getattr') {
+          // getattr(obj, "export_" + fmt)() — имя метода собирается из строки
+          const ga = field(f, 'arguments')?.namedChildren || [];
+          const nameArg = ga[1];
+          let prefix = null;
+          if (nameArg?.type === 'string') prefix = nameArg.text.replace(/^[rubfRUBF]*['"]|['"]$/g, '').split('{')[0];
+          else if (nameArg?.type === 'binary_operator' && field(nameArg, 'left')?.type === 'string') prefix = field(nameArg, 'left').text.replace(/^[rubfRUBF]*['"]|['"]$/g, '');
+          site(n, 'dispatch', { t: 'getattr', obj: exprSpec(ga[0]), prefix, exact: nameArg?.type === 'string' && !nameArg.text.includes('{'), text: f.text.length < 70 ? f.text : 'getattr(…)' }, ctx);
+          visit(field(f, 'arguments'), ctx);
+        } else if (f?.type === 'attribute') {
           site(n, 'call', { t: 'attr', obj: exprSpec(field(f, 'object')), attr: field(f, 'attribute').text }, ctx);
           visit(field(f, 'object'), ctx);
         } else visit(f, ctx);
@@ -150,6 +162,7 @@ function scanFunction(def, cls) {
       case 'assignment': {
         const l = field(n, 'left'), r = field(n, 'right'), t = field(n, 'type');
         if (l?.type === 'identifier') bind(l.text, t ? { k: 'ann', text: t.text } : exprSpec(r));
+        if (l?.type === 'identifier' && r?.type === 'dictionary') fn.dicts[l.text] = r.namedChildren.filter((p) => p.type === 'pair').map((p) => field(p, 'value')).filter((v) => v && (v.type === 'identifier' || v.type === 'attribute')).map((v) => ({ text: v.text, spec: exprSpec(v) }));
         if (r && (r.type === 'identifier' || r.type === 'attribute')) ref(r, ctx); else visit(r, ctx);
         return;
       }
@@ -251,6 +264,8 @@ function collectFacts(root) {
   const classes = {}; // имя класса → [методы]
   const classAttrs = {}; // класс → { поле: { ann } | { spec, method } }
   const fns = {}; // имя (как в items) → факты функции
+  const bases = {}; // класс → базовые классы (для унаследованных методов)
+  const dicts = {}; // словарь уровня модуля → его значения-функции (HANDLERS = {"pdf": export_pdf})
   const top = new Set();
 
   for (const n of root.namedChildren) {
@@ -274,6 +289,7 @@ function collectFacts(root) {
       const a = n.namedChild(0);
       const left = field(a, 'left'), right = field(a, 'right'), typ = field(a, 'type');
       if (left?.type === 'identifier') instances[left.text] = typ ? { ann: typ.text } : { spec: exprSpec(right) };
+      if (left?.type === 'identifier' && right?.type === 'dictionary') dicts[left.text] = right.namedChildren.filter((p) => p.type === 'pair').map((p) => field(p, 'value')).filter((v) => v && (v.type === 'identifier' || v.type === 'attribute')).map((v) => ({ text: v.text, spec: exprSpec(v) }));
     }
     const u = n.type === 'decorated_definition' ? field(n, 'definition') : n;
     if (u && (u.type === 'function_definition' || u.type === 'class_definition')) top.add(field(u, 'name').text);
@@ -281,6 +297,7 @@ function collectFacts(root) {
     if (u?.type === 'class_definition') {
       const cname = field(u, 'name').text;
       classes[cname] = [];
+      bases[cname] = (field(u, 'superclasses')?.namedChildren || []).filter((b) => b.type === 'identifier' || b.type === 'attribute').map((b) => b.text.split('.').pop());
       const attrs = (classAttrs[cname] = {});
       for (const m of field(u, 'body')?.namedChildren || []) {
         // поля класса с аннотацией (dataclass): items: list[Item] = …
@@ -306,7 +323,7 @@ function collectFacts(root) {
       }
     }
   }
-  return { imports, instances, classes, classAttrs, top: [...top], fns };
+  return { imports, instances, classes, classAttrs, bases, dicts, top: [...top], fns };
 }
 
 // ---- граф вызовов для всех Python-файлов проекта ----
@@ -378,7 +395,23 @@ export function pythonSites(pyFiles, kinds) {
     return (ctxCache[file] = { file, facts, resolveName, importTarget, moduleOf });
   }
 
-  const method = (cls, attr) => (cls && classMethods[cls]?.has(attr) ? `${classFile[cls]}::${cls}.${attr}` : null);
+  // метод класса — или его родителя: class Admin(User) и admin.can_edit() → User.can_edit
+  const classBases = {};
+  for (const facts of Object.values(pyFiles)) for (const [c, b] of Object.entries(facts.bases || {})) classBases[c] ??= b;
+  const inheritedFrom = {}; // «Класс.метод» → родитель, где метод на самом деле объявлен
+  function method(cls, attr, depth = 0) {
+    if (!cls || depth > 6) return null;
+    if (classMethods[cls]?.has(attr)) return `${classFile[cls]}::${cls}.${attr}`;
+    for (const b of classBases[cls] || []) {
+      if (!classFile[b] || b === cls) continue;
+      const m = method(b, attr, depth + 1);
+      if (m) { inheritedFrom[`${cls}.${attr}`] = b; return m; }
+    }
+    return null;
+  }
+  // у какого класса проекта есть метод с таким именем — для догадки, когда тип неизвестен
+  const methodOwners = {};
+  for (const [c, ms] of Object.entries(classMethods)) for (const m of ms) if (!m.startsWith('__')) (methodOwners[m] ||= []).push(c);
   const known = (w) => (classFile[w] ? w : null);
   function annType(text) {
     if (!text) return null;
@@ -442,6 +475,7 @@ export function pythonSites(pyFiles, kinds) {
         return globalInst[spec.name] ? { c: globalInst[spec.name] } : null;
       }
       case 'call': {
+        if (spec.name === 'super' && fn?.cls) { const b = (classBases[fn.cls] || []).find((x) => classFile[x]); return b ? { c: b } : null; }
         if (known(spec.name)) return { c: spec.name };
         return retType(fc.resolveName(spec.name), depth);
       }
@@ -472,18 +506,49 @@ export function pythonSites(pyFiles, kinds) {
       const src = `${file}::${qual}`;
       const env = { fc, fn };
       const shadow = new Set(fn.names);
+      const resolveValue = (v) => {
+        if (v.spec?.k === 'var') return shadow.has(v.spec.name) ? null : fc.resolveName(v.spec.name);
+        if (v.spec?.k === 'attr') { const ot = typeOf(v.spec.obj, env); return ot?.c ? method(ot.c, v.spec.attr) : null; }
+        return null;
+      };
       for (const s of fn.sites) {
-        let tgt = null;
+        let tgt = null, kind = s.kind, label = '';
         const t = s.target;
+        if (t.t === 'dict') {
+          // handlers[kind](...) — связь с каждой функцией словаря: «вызывается одна из»
+          const vals = fn.dicts[t.name] || fc.facts.dicts?.[t.name] || [];
+          for (const v of vals) {
+            const id = resolveValue(v);
+            if (id && id !== src && kinds.has(id)) out.push({ src, tgt: id, line: s.line, kind: 'dispatch', ctx: s.ctx, label: t.text || `${t.name}[…]` });
+          }
+          continue;
+        }
+        if (t.t === 'getattr') {
+          // getattr(obj, "export_" + fmt)() — методы класса obj, чьё имя начинается так
+          const ot = typeOf(t.obj, env);
+          if (ot?.c && t.prefix) {
+            const cands = [...(classMethods[ot.c] || [])].filter((m) => (t.exact ? m === t.prefix : m.startsWith(t.prefix)));
+            for (const m of cands) { const id = method(ot.c, m); if (id && kinds.has(id)) out.push({ src, tgt: id, line: s.line, kind: t.exact ? 'call' : 'dispatch', ctx: s.ctx, label: t.text }); }
+          }
+          continue;
+        }
         if (t.t === 'name') tgt = shadow.has(t.name) ? null : fc.resolveName(t.name);
         else if (t.t === 'attr') {
           const ot = typeOf(t.obj, env);
-          if (ot?.c) tgt = method(ot.c, t.attr);
+          if (ot?.c) {
+            tgt = method(ot.c, t.attr);
+            if (tgt && inheritedFrom[`${ot.c}.${t.attr}`]) label = `унаследован от ${inheritedFrom[`${ot.c}.${t.attr}`]}`;
+          }
           if (!tgt && t.obj?.k === 'var') { const mf = fc.moduleOf(t.obj.name); if (mf) tgt = `${mf}::${t.attr}`; }
+          // тип объекта неизвестен, но метод с таким именем есть ровно у одного класса проекта — догадка
+          if (!tgt && !ot && s.kind === 'call' && !GUESS_STOP.has(t.attr) && !(t.obj?.k === 'var' && fc.facts.imports[t.obj.name])) {
+            const owners = methodOwners[t.attr] || [];
+            if (owners.length === 1) { tgt = method(owners[0], t.attr); kind = 'guess'; label = `тип не записан — похоже на ${owners[0]}`; }
+          }
         }
         if (!tgt || tgt === src || !kinds.has(tgt)) continue;
-        if (s.kind === 'ref' && kinds.get(tgt) === 'class') continue; // isinstance(x, Cls) и т. п. — не «передача функции»
-        out.push({ src, tgt, line: s.line, kind: s.kind, ctx: s.ctx });
+        if (kind === 'ref' && kinds.get(tgt) === 'class') continue; // isinstance(x, Cls) и т. п. — не «передача функции»
+        out.push({ src, tgt, line: s.line, kind, ctx: s.ctx, label });
       }
     }
   }
@@ -650,6 +715,8 @@ export function pythonSites(pyFiles, kinds) {
   return { sites: out, entities, promote, web: { routes, roles } };
 }
 
+// слишком общие имена: у словарей, списков, строк, файлов, библиотек они есть всегда — не угадываем
+export const GUESS_STOP = new Set(['get', 'set', 'items', 'keys', 'values', 'append', 'extend', 'insert', 'remove', 'pop', 'clear', 'update', 'copy', 'add', 'discard', 'index', 'count', 'sort', 'reverse', 'format', 'join', 'split', 'strip', 'replace', 'lower', 'upper', 'startswith', 'endswith', 'encode', 'decode', 'read', 'write', 'close', 'open', 'send', 'recv', 'json', 'dict', 'model_dump', 'execute', 'fetchone', 'fetchall', 'commit', 'rollback', 'cursor', 'connect', 'run', 'start', 'stop', 'info', 'debug', 'warning', 'error', 'exception', 'log', 'put', 'post', 'delete', 'patch', 'head', 'call', 'apply', 'filter', 'map', 'find', 'first', 'all', 'one', 'save', 'load', 'dump', 'dumps', 'loads', 'parse', 'render', 'process', 'handle', 'validate', 'create', 'build', 'init', 'setup', 'reset', 'to_dict', 'from_dict', 'flush', 'wait', 'result', 'done', 'cancel', 'next', 'then', 'catch', 'push', 'shift', 'slice', 'splice', 'includes', 'forEach', 'toString', 'trim', 'emit', 'on', 'once', 'off', 'listen', 'use']);
 const HTTPM_PY = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'websocket', 'api_route', 'route']);
 const KNOWN_PY = {
   CORSMiddleware: 'разрешает запросы с других сайтов (CORS)',

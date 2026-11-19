@@ -9,6 +9,7 @@ import { entryPoints, buildScenario, ROLE_RU } from '../../../core/scenario.js';
 import { useCode } from './useCode';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
+import { linkOf } from './linkKinds';
 
 const DEPTHS = [2, 3, 4, 6];
 // цвет роли шага на пути запроса
@@ -128,7 +129,7 @@ function StepRow({ step, it, active, onClick, story }) {
         <span className={`font-mono text-[12.5px] truncate ${step.repeat || step.synthetic ? 'text-mist' : ''} ${step.role === 'request' ? 'text-stone' : ''}`}>
           {step.synthetic ? step.label : step.label && step.label !== it?.name ? <>{step.label} <span className="text-mist-dim">→ {it?.name}</span></> : it?.name}
         </span>
-        {step.kind === 'ref' && <span className="text-[10px] text-mist border border-dashed border-mist-dim rounded px-1 flex-shrink-0">передаётся</span>}
+        {linkOf(step.kind).short && <span className={`text-[10px] text-mist border rounded px-1 flex-shrink-0 ${linkOf(step.kind).border}`}>{linkOf(step.kind).short}</span>}
         {step.repeat && <span className="text-[10.5px] text-mist-dim flex-shrink-0">↩ было выше</span>}
         {step.cut && <span className="text-[10.5px] text-mist-dim flex-shrink-0">… дальше</span>}
         {story && <span className="w-1.5 h-1.5 rounded-full bg-bronze flex-shrink-0" title="есть рассказ" />}
@@ -279,7 +280,7 @@ export function ScenarioView({ view, ix, id, method }) {
                   <button className="font-mono text-stone hover:text-bronze" onClick={() => setCur(parent.n)}>{pit.name}</button>
                   {step.line ? <>, строка {step.line}</> : null}
                   {step.ctx && <> — внутри <span className="font-mono text-bronze/90">{step.ctx}</span></>}
-                  {step.kind === 'ref' && '. Здесь функция не вызывается сразу: её отдают дальше (в onClick, аргументом, в список), и вызовут позже.'}
+                  {linkOf(step.kind).title && <div className="mt-1.5 text-[13px] text-stone"><b>«{linkOf(step.kind).short}»</b> — {linkOf(step.kind).title}</div>}
                 </div>
               )}
             </>
@@ -312,7 +313,7 @@ export function ScenarioView({ view, ix, id, method }) {
             <div className="mt-3 flex flex-wrap gap-1.5">
               <span className="text-[12px] text-mist mr-1 self-center">Дальше:</span>
               {children.map((c) => (
-                <button key={c.n} onClick={() => setCur(c.n)} className={`font-mono text-[12px] px-2 py-1 rounded-md border bg-panel-2 hover:border-bronze hover:text-bronze ${c.kind === 'ref' ? 'border-dashed border-mist-dim' : 'border-hairline'}`}>
+                <button key={c.n} onClick={() => setCur(c.n)} className={`font-mono text-[12px] px-2 py-1 rounded-md border bg-panel-2 hover:border-bronze hover:text-bronze ${linkOf(c.kind).border}`}>
                   {c.n}. {ix.itemById[c.id]?.name}{c.line ? <span className="text-mist-dim"> · стр. {c.line}</span> : null}
                 </button>
               ))}

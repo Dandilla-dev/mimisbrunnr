@@ -59,7 +59,9 @@ export async function analyzeSources(sources) {
   const pair = new Map();
   for (const s of sites) {
     const k = `${s.src}\u0000${s.tgt}`;
-    if (!pair.has(k) || s.kind === 'call') pair.set(k, s.kind);
+    // если между двумя функциями есть и точный вызов, и догадка — на схеме остаётся точный
+    const RANK = { call: 4, dispatch: 3, guess: 2, ref: 1 };
+    if (!pair.has(k) || (RANK[s.kind] || 0) > (RANK[pair.get(k)] || 0)) pair.set(k, s.kind);
   }
   const edges = [...pair].map(([k, kind]) => [...k.split('\u0000'), kind]);
   // сущности, путь запроса, роли и «что внутри функций»

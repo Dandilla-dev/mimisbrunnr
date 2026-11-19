@@ -21,7 +21,8 @@ export function storyPrompt(view, getCode, sc) {
     const role = s.role ? `[${ROLE_RU[s.role] || s.role}] ` : '';
     if (!s.id) return `${pad}${s.n}. ${role}${s.ctx ? `(только ${s.ctx}) ` : ''}${s.label}${s.about ? ` — ${s.about.replace(/\n/g, '; ')}` : ''}`;
     const it = itemById[s.id];
-    const how = s.depth === 0 || !s.line ? '' : `${s.kind === 'ref' ? 'передаётся (вызовется позже)' : 'вызывается'} в строке ${s.line}${s.ctx ? `, внутри «${s.ctx}»` : ''}; `;
+    const verb = { ref: 'передаётся (вызовется позже)', dispatch: 'одна из функций, которые могут вызваться (зависит от данных)', guess: 'предположительно вызывается (тип объекта не записан)' }[s.kind] || 'вызывается';
+    const how = s.depth === 0 || !s.line ? '' : `${verb} в строке ${s.line}${s.ctx ? `, внутри «${s.ctx}»` : ''}; `;
     const note = s.repeat ? ' (уже было выше)' : s.cut ? ' (дальше не раскрыто)' : '';
     return `${pad}${s.n}. ${role}${how}${s.label ? `${s.label} → ` : ''}${it.name} — ${it.file}:${it.line}${note}${s.about ? ` (${s.about})` : ''}`;
   }).join('\n');

@@ -127,7 +127,14 @@ try {
   const site = (sess, a, b) => sess.sites.find(([x, y]) => x === a && y === b);
   assert.equal(site(back, 'app/services/orders.py::OrderService.create', 'app/db.py::Database.insert')[4], 'with self.repo.transaction():');
   assert.equal(site(back, 'app/db.py::Database.query', 'app/db.py::Database.connect')[4], 'if not self.connected:');
-  step('Python: тип из результата функции, связи «передаётся», места вызовов с условиями');
+  // наследование, getattr по строке, словарь функций, догадка о типе
+  assert.ok(back.sites.some(([a, b, , k, , label]) => a === 'app/reports.py::CsvExporter.export_pdf' && b === 'app/reports.py::BaseExporter.export' && k === 'call' && /унаследован от BaseExporter/.test(label)));
+  assert.ok(hasEdge(back, 'app/reports.py::make_report', 'app/reports.py::BaseExporter.header')); // exp.header(), exp: CsvExporter
+  assert.equal(kindOfEdge(back, 'app/reports.py::make_report', 'app/reports.py::CsvExporter.export_csv'), 'dispatch');
+  assert.equal(kindOfEdge(back, 'app/reports.py::make_report', 'app/reports.py::CsvExporter.export_pdf'), 'dispatch');
+  assert.equal(kindOfEdge(back, 'app/reports.py::transform', 'app/reports.py::to_upper'), 'dispatch');
+  assert.equal(kindOfEdge(back, 'app/reports.py::notify', 'app/reports.py::Mailer.deliver_welcome'), 'guess');
+  step('Python: тип из результата функции, связи «передаётся», места вызовов с условиями, наследование, «одна из», догадки');
   assert.equal(back.counts.none, back.counts.total);
   step(`папка (Python): ${back.files.length} файлов, ${back.items.length} функций, ${back.edges.length} связей, слои: ${back.layers.map((l) => l.name).join(', ')}`);
 
@@ -155,7 +162,12 @@ try {
     ['src/features/cart/useCart.js::useCart.remove', 'src/features/cart/cartSlice.js::cartSlice.removeItem'], // export const { removeItem } = slice.actions
   ]) assert.ok(hasEdge(front, a, b), `${a} → ${b}`);
   assert.equal(front.edges.find(([x, y]) => x === 'src/features/cart/CartPage.jsx::CartPage' && y === 'src/features/cart/CartPage.jsx::CartPage.handleRemove')?.[2], 'ref'); // onRemove={handleRemove}
-  step('JS/TS: тип из результата функции, действия createSlice, обработчик в JSX — «передаётся»');
+  const fk = (a, b) => front.edges.find(([x, y]) => x === a && y === b)?.[2];
+  assert.equal(fk('src/legacy/Counter.js::StepCounter.incrementTwice', 'src/legacy/Counter.js::Counter.increment'), 'call'); // this.increment() — от родителя
+  assert.equal(fk('src/legacy/Counter.js::StepCounter.incrementTwice', 'src/legacy/Counter.js::Counter.reset'), 'call'); // super.reset()
+  assert.equal(fk('src/utils/dispatch.js::dispatch', 'src/utils/dispatch.js::onCreate'), 'dispatch'); // handlers[event.type](event)
+  assert.equal(fk('src/utils/dispatch.js::notify', 'src/utils/dispatch.js::Mailer.sendWelcomeLetter'), 'guess');
+  step('JS/TS: тип из результата функции, действия createSlice, обработчик в JSX — «передаётся», наследование, «одна из», догадки');
   step(`GitHub (JS/React): ${front.files.length} файлов, ${front.items.length} позиций, коммит ${front.commit.short} «${front.commit.subject}»`);
   const code = await core.code(front.id, 'src/App.jsx');
   assert.equal(code, fs.readFileSync(path.join(JS, 'src/App.jsx'), 'utf8'));

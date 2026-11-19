@@ -159,7 +159,8 @@ export async function runExplain(ctx, scope) {
   const budget = Number(scope.budgetUsd ?? ctx.settings.data.budgetUsd) || 0;
   const callers = {}, callees = {};
   // функции, которые передаются (onClick={f}, аргументом), помечаем — модель не спутает с прямым вызовом
-  for (const [a, b, k] of view.edges) { (callees[a] ||= []).push(k === 'ref' ? `${b} (передаётся)` : b); (callers[b] ||= []).push(k === 'ref' ? `${a} (передаёт)` : a); }
+  const NOTE = { ref: ['передаётся', 'передаёт'], dispatch: ['одна из, по значению', 'одна из, по значению'], guess: ['предположительно', 'предположительно'] };
+  for (const [a, b, k] of view.edges) { (callees[a] ||= []).push(NOTE[k] ? `${b} (${NOTE[k][0]})` : b); (callers[b] ||= []).push(NOTE[k] ? `${a} (${NOTE[k][1]})` : a); }
   const itemById = Object.fromEntries(view.items.map((i) => [i.id, i]));
 
   const st = { done: 0, total: p.count, spent: 0, inTok: 0, outTok: 0, file: '', log: [], status: 'running', errors: 0 };

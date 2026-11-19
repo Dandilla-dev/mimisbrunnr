@@ -7,6 +7,7 @@ import { useDispatch } from 'react-redux';
 import { go } from '../../app/store';
 import Graph from '../../components/Graph';
 import { layerColor } from './MapColumn';
+import { linkOf } from './linkKinds';
 
 const plural = (n, a, b, c) => { const m = n % 10, h = n % 100; return m === 1 && h !== 11 ? a : m >= 2 && m <= 4 && (h < 12 || h > 14) ? b : c; };
 const calls = (n) => `${n} ${plural(n, 'вызов', 'вызова', 'вызовов')}`;
@@ -176,7 +177,7 @@ export function FnDiagram({ view, ix, id }) {
       return { id: x, label: it.name, sub: `${it.file.split('/').pop()}:${it.line}`, mono: true, color: layerColor(view, ix.fileByPath[it.file]?.layer), emphasis: x === id ? 'center' : undefined, title: it.phrase || it.name };
     });
     const es = view.edges.filter(([a, b]) => set.has(a) && set.has(b) && (depth > 1 || a === id || b === id))
-      .map(([a, b, k]) => ({ id: `${a}>${b}`, source: a, target: b, dashed: k === 'ref' }));
+      .map(([a, b, k]) => ({ id: `${a}>${b}`, source: a, target: b, dash: linkOf(k).dash, label: k === 'guess' ? '?' : k === 'dispatch' ? 'или' : undefined }));
     return { nodes: ns, edges: es, cut: cutCount };
   }, [view, ix, id, depth]);
   return (
@@ -193,7 +194,7 @@ export function FnDiagram({ view, ix, id }) {
         onNodeClick={(n) => { if (n.id !== id) dispatch(go({ t: 'fn', id: n.id })); }}
         emptyText="Связей нет."
       />
-      <div className="text-[12px] text-mist-dim mt-2">Слева — кто вызывает эту функцию, справа — кого вызывает она. Пунктир — функция не вызывается, а передаётся (например, в onClick или аргументом): её вызовут позже. Цвет полоски — часть проекта.</div>
+      <div className="text-[12px] text-mist-dim mt-2">Слева — кто вызывает эту функцию, справа — кого вызывает она. Сплошная стрелка — точный вызов. Короткий пунктир — функция не вызывается, а передаётся (в onClick, аргументом): её вызовут позже. Длинный пунктир с «или» — вызывается одна из нескольких функций, какая — зависит от данных. Точки с «?» — догадка: тип объекта в коде не записан. Цвет полоски — часть проекта.</div>
     </div>
   );
 }

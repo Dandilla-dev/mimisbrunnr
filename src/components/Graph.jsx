@@ -30,7 +30,7 @@ function pathOf(section) {
 
 /**
  * nodes: [{ id, label, sub?, color?, emphasis?: 'center'|'ghost' }]
- * edges: [{ id, source, target, label?, weight?, dashed? }] — dashed: функция передаётся, а не вызывается
+ * edges: [{ id, source, target, label?, weight?, dashed?, dash? }] — dashed/dash: пунктир (передаётся, одна из, догадка)
  */
 export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420, onNodeClick, onEdgeClick, selectedEdge, emptyText = 'Связей нет.' }) {
   const [laid, setLaid] = useState(null); // { key, res } — раскладка и то, для какой схемы она посчитана
@@ -158,7 +158,7 @@ export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420,
                     <g key={e.id} opacity={dim ? 0.25 : 1}>
                       {e.sections?.map((s, i) => (
                         <g key={i}>
-                          <path d={pathOf(s)} fill="none" stroke={on ? '#B98D55' : '#4A544D'} strokeWidth={w} strokeDasharray={src.dashed ? '5 4' : undefined} markerEnd={`url(#${on ? 'arr-on' : 'arr'})`} />
+                          <path d={pathOf(s)} fill="none" stroke={on ? '#B98D55' : '#4A544D'} strokeWidth={w} strokeDasharray={src.dash || (src.dashed ? '5 4' : undefined)} markerEnd={`url(#${on ? 'arr-on' : 'arr'})`} />
                           {onEdgeClick && <path data-hit d={pathOf(s)} fill="none" stroke="transparent" strokeWidth="12" className="cursor-pointer" onClick={() => onEdgeClick(src)} />}
                         </g>
                       ))}
