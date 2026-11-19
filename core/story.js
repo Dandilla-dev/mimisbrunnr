@@ -19,7 +19,7 @@ export function storyPrompt(view, getCode, sc) {
   const stepLines = sc.steps.map((s) => {
     const pad = '  '.repeat(s.depth);
     const role = s.role ? `[${ROLE_RU[s.role] || s.role}] ` : '';
-    if (!s.id) return `${pad}${s.n}. ${role}${s.label}${s.about ? ` — ${s.about.replace(/\n/g, '; ')}` : ''}`;
+    if (!s.id) return `${pad}${s.n}. ${role}${s.ctx ? `(только ${s.ctx}) ` : ''}${s.label}${s.about ? ` — ${s.about.replace(/\n/g, '; ')}` : ''}`;
     const it = itemById[s.id];
     const how = s.depth === 0 || !s.line ? '' : `${s.kind === 'ref' ? 'передаётся (вызовется позже)' : 'вызывается'} в строке ${s.line}${s.ctx ? `, внутри «${s.ctx}»` : ''}; `;
     const note = s.repeat ? ' (уже было выше)' : s.cut ? ' (дальше не раскрыто)' : '';

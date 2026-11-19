@@ -525,7 +525,7 @@ export function pythonSites(pyFiles, kinds) {
     return null;
   };
   for (const [file, facts] of Object.entries(pyFiles)) {
-    for (const [name, v] of Object.entries(facts.web?.vars || {})) containers[ck(file, name)] = { file, name, ...v, routes: [], mws: [], errors: [], ext: [], includes: [] };
+    for (const [name, v] of Object.entries(facts.web?.vars || {})) containers[ck(file, name)] = { file, name, ...v, routes: [], mws: [], errors: [], ext: [], includes: [], passes: [] };
   }
   for (const [file, facts] of Object.entries(pyFiles)) {
     const fc = fileCtx(file);
@@ -546,11 +546,23 @@ export function pythonSites(pyFiles, kinds) {
         else if (dec.method === 'exception_handler' || dec.method === 'errorhandler' || dec.method === 'app_errorhandler') c.errors.push({ role: 'error', id, label: `${dec.first || ''}`, about: `обрабатывает ${dec.first || 'ошибку'}`, file, line: d.line });
       }
     }
+    // функция, получившая приложение параметром (def register_routers(app): app.include_router(...))
+    const paramC = (fn, fw) => (containers[`fn:${file}::${fn}`] ||= { file, name: fn, kind: 'param', fw, prefix: '', deps: [], routes: [], mws: [], errors: [], ext: [], includes: [], passes: [] });
     for (const call of facts.web?.calls || []) {
-      const c = containers[varOf(file, call.obj)];
+      const c = call.objIsParam && call.fn ? paramC(call.fn, call.method === 'register_blueprint' ? 'flask' : 'fastapi') : containers[varOf(file, call.obj)];
       if (!c) continue;
-      if (call.method === 'add_middleware') c.ext.push({ role: AUTH.test(call.target) ? 'auth' : 'middleware', id: null, label: call.target, about: KNOWN_PY[call.target] || 'подключённый middleware', file, line: call.line });
-      else c.includes.push({ target: varOf(file, call.target), prefix: call.prefix, deps: call.deps, line: call.line, file, text: call.target });
+      if (call.method === 'add_middleware') c.ext.push({ role: AUTH.test(call.target) ? 'auth' : 'middleware', id: null, label: call.target, about: KNOWN_PY[call.target] || 'подключённый middleware', file, line: call.line, cond: call.cond });
+      else {
+        const list = call.targets || [call.target];
+        for (const t of list) c.includes.push({ target: varOf(file, t), prefix: call.prefix, deps: call.deps, line: call.line, file, text: t, cond: call.cond, loop: call.targets ? call.loopVar : '' });
+      }
+    }
+    for (const ps of facts.web?.passes || []) {
+      const c = ps.argIsParam && ps.fn ? paramC(ps.fn, 'fastapi') : containers[varOf(file, ps.arg)];
+      if (!c) continue;
+      const id = fc.resolveName(ps.callee.split('.').pop()) && !ps.callee.includes('.') ? fc.resolveName(ps.callee)
+        : ps.callee.includes('.') ? (() => { const [m, f] = ps.callee.split('.'); const mf = fc.moduleOf(m); return mf ? `${mf}::${f}` : null; })() : null;
+      if (id) (c.passes ||= []).push({ target: `fn:${id}`, file, line: ps.line, cond: ps.cond, text: ps.text });
     }
     void fc;
   }
@@ -597,9 +609,16 @@ export function pythonSites(pyFiles, kinds) {
         routes.push({ ...(flags || {}), id: r.id, method: m, path: join(pre, r.path), fw: c.fw, file: r.file, line: r.line, chain, errors: [...errs, builtin], response: r.responseModel ? { model: byModel[r.responseModel] || null, text: r.responseModel, status: r.status } : null });
       }
     }
+    for (const ps of c.passes || []) {
+      // register_routers(app): всё, что функция подключает к приложению, — сюда же
+      const t = containers[ps.target];
+      if (!t) continue;
+      const tagged = ps.cond ? mws.map((x) => x) : mws;
+      walkC(ps.target, pre, tagged, allDeps, errs, depth + 1, flags);
+    }
     for (const inc of c.includes) {
       if (!inc.target) continue;
-      const rs = { role: 'router', id: null, label: inc.text, about: `подключён${inc.prefix ? ` по адресу ${join(pre, inc.prefix)}` : ''}`, file: inc.file, line: inc.line };
+      const rs = { role: 'router', id: null, label: inc.text, about: `подключён${inc.prefix ? ` по адресу ${join(pre, inc.prefix)}` : ''}${inc.loop ? ` (в цикле по списку, переменная ${inc.loop})` : ''}`, file: inc.file, line: inc.line, cond: inc.cond || '' };
       walkC(inc.target, join(pre, inc.prefix), [...mws, rs], [...allDeps, ...inc.deps.map((n) => depStep(inc.file, n, 'зависимость подключения'))], errs, depth + 1, flags);
     }
     for (const x of c.mws) if (x.id) roles[x.id] ??= x.role;

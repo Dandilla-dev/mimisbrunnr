@@ -277,6 +277,11 @@ export function parseJs(file, source, grammar) {
             return;
           }
           if (left?.text === 'module.exports' && right?.type === 'object') { objectMethods(right, stem); return; }
+          if (left?.text === 'module.exports' && right && FUNC.has(right.type)) {
+            add({ name: stem, kind: 'function', outer: node, fn: right, sigNode: node, body: field(right, 'body') });
+            visit(field(right, 'body'), stem);
+            return;
+          }
         }
         break;
       }
@@ -362,6 +367,7 @@ function collectFacts(root, ranges, stem) {
       const left = field(n, 'left'), right = field(n, 'right');
       if (left?.text === 'module.exports') {
         if (right?.type === 'identifier') exportsMap.default = right.text;
+        if (right && FUNC.has(right.type)) exportsMap.default = stem;
         if (right?.type === 'object') {
           for (const p of right.namedChildren) {
             if (p.type === 'shorthand_property_identifier') exportsMap[p.text] = p.text;

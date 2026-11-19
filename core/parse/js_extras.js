@@ -400,6 +400,69 @@ export function jsExtras(root, ctx) {
 
   const ownerRanges = [...ranges].sort((a, b) => (a.end - a.start) - (b.end - b.start));
   const ownerOf = (n) => ownerRanges.find((r) => r.start <= n.startIndex && n.endIndex <= r.end) || null;
+  const passes = []; // registerRoutes(app) / require('./routes')(app): приложение передано в функцию
+  const nestMods = { globals: [], mw: [] }; // APP_GUARD … и consumer.apply().forRoutes()
+
+  // значения констант в файле — для «for (const r of routers)», где routers = [a, b]
+  const declVal = {};
+  for (const n of walk(root)) if (n.type === 'variable_declarator' && field(n, 'name')?.type === 'identifier' && field(n, 'value')) declVal[field(n, 'name').text] ??= field(n, 'value');
+  function listElems(n, depth = 0) {
+    if (!n || depth > 3) return null;
+    if (n.type === 'array') return n.namedChildren.filter((c) => c.type !== 'spread_element');
+    if (n.type === 'identifier' && declVal[n.text]) return listElems(declVal[n.text], depth + 1);
+    if (n.type === 'call_expression' && /^Object\.values$/.test(field(n, 'function')?.text || '')) {
+      let o = field(n, 'arguments')?.namedChild(0);
+      if (o?.type === 'identifier') o = declVal[o.text];
+      if (o?.type === 'object') return pairs(o).map(valOf).filter(Boolean);
+    }
+    return null;
+  }
+  // имя — переменная цикла по списку, записанному в коде? → элементы списка
+  function loopList(idNode) {
+    const name = idNode.text;
+    for (let p = idNode.parent; p && p.type !== 'program'; p = p.parent) {
+      if (p.type === 'for_in_statement' && field(p, 'left')?.text === name) return listElems(field(p, 'right'));
+      if ((p.type === 'arrow_function' || p.type === 'function_expression') && (field(p, 'parameters')?.namedChildren || [field(p, 'parameter')]).some((x) => x && (x.text === name || field(x, 'pattern')?.text === name))) {
+        const call = p.parent?.type === 'arguments' ? p.parent.parent : null;
+        const fm = call && field(call, 'function');
+        if (fm?.type === 'member_expression' && ['forEach', 'map'].includes(field(fm, 'property')?.text)) return listElems(field(fm, 'object'));
+        return null;
+      }
+    }
+    return null;
+  }
+  // условие вокруг подключения: if (…) app.use(x) / cond && app.use(x)
+  function condOf(n) {
+    const out = [];
+    for (let c = n, p = n.parent; p && p.type !== 'program' && !FUNC.has(p.type); c = p, p = p.parent) {
+      if (p.type === 'if_statement') {
+        const cond = short((field(p, 'condition')?.text || '').replace(/^\(|\)$/g, ''), 50);
+        if (field(p, 'alternative') && key(field(p, 'alternative')) === key(c)) out.unshift(`если не ${cond}`);
+        else if (field(p, 'consequence') && key(field(p, 'consequence')) === key(c)) out.unshift(`если ${cond}`);
+      } else if (p.type === 'binary_expression' && field(p, 'right') && key(field(p, 'right')) === key(c)) {
+        const op = p.children.find((x) => !x.isNamed)?.text;
+        if (op === '&&') out.unshift(`если ${short(field(p, 'left')?.text, 50)}`);
+        if (op === '||') out.unshift(`если не ${short(field(p, 'left')?.text, 50)}`);
+      }
+    }
+    return out.join(' и ');
+  }
+  // аргумент подключения → описание(я): список из цикла, тернарный выбор, обычный обработчик
+  function handlerOf(a) {
+    if (a?.type === 'identifier') {
+      const elems = loopList(a);
+      if (elems) return [{ t: 'array', items: elems.map((x) => describe(x, nodeItem)).filter(Boolean), loop: a.text }];
+    }
+    if (a?.type === 'ternary_expression') {
+      const c = short(field(a, 'condition')?.text, 50);
+      return [
+        { ...describe(field(a, 'consequence'), nodeItem), cond: `одно из двух: если ${c}` },
+        { ...describe(field(a, 'alternative'), nodeItem), cond: `одно из двух: если не ${c}` },
+      ].filter((x) => x.t);
+    }
+    const d = describe(a, nodeItem);
+    return d ? [d] : [];
+  }
   for (const r of ranges) if (r.fn) params[r.id] = (field(r.fn, 'parameters')?.namedChildren || []).length;
 
   for (const n of walk(root)) {
@@ -418,6 +481,21 @@ export function jsExtras(root, ctx) {
     }
     if (n.type !== 'call_expression') continue;
     const f = field(n, 'function');
+    // registerRoutes(app) / setup.routes(app) / require('./routes')(app) — приложение передают в функцию
+    {
+      const args0 = field(n, 'arguments')?.namedChildren || [];
+      const owner0 = ownerOf(n);
+      const ownerParams = owner0?.fn ? (field(owner0.fn, 'parameters')?.namedChildren || []).map((x) => field(x, 'pattern')?.text || x.text) : [];
+      args0.forEach((a, i) => {
+        if (a.type !== 'identifier' || !(vars[a.text] || ownerParams.includes(a.text) || /^(app|server|router|fastify|instance)$/.test(a.text))) return;
+        if (!f || f.type === 'member_expression' && MOUNT.has(field(f, 'property')?.text)) return;
+        const callee = f.type === 'call_expression' && field(f, 'function')?.text === 'require'
+          ? { t: 'require', source: strValue(field(f, 'arguments')?.namedChild(0)) }
+          : describe(f, nodeItem);
+        if (!callee || (callee.t === 'name' && ['express', 'Router', 'Fastify', 'fastify', 'require'].includes(callee.name))) return;
+        passes.push({ callee, argIndex: i, arg: a.text, line: line(n), container: owner0?.id || null, argIsParam: ownerParams.includes(a.text) && !vars[a.text], cond: condOf(n), text: short(n.text, 80) });
+      });
+    }
     if (f?.type !== 'member_expression') continue;
     const method = field(f, 'property')?.text;
     const args = field(n, 'arguments')?.namedChildren || [];
@@ -459,13 +537,14 @@ export function jsExtras(root, ctx) {
     const selfId = nodeItem.get(key(n));
     const owner = ownerRanges.find((r) => r.id !== selfId && r.start <= n.startIndex && n.endIndex <= r.end) || null;
     const ownerFn = owner?.fn;
-    const firstParam = ownerFn ? (field(ownerFn, 'parameters')?.namedChildren || [])[0] : null;
+    const fnParams = ownerFn ? (field(ownerFn, 'parameters')?.namedChildren || []).map((x) => field(x, 'pattern')?.text || x.text) : [];
+    const paramIndex = vars[base.text] ? -1 : fnParams.indexOf(base.text);
     mounts.push({
-      obj: base.text, method, path, line: line(n),
+      obj: base.text, method, path, line: line(n), cond: condOf(n),
       routeId: HTTP.has(method) || (method === 'route' && args[0]?.type === 'object') ? nodeItem.get(key(n)) || null : null,
       container: owner?.id || null,
-      objIsParam: Boolean(firstParam && (firstParam.text === base.text || field(firstParam, 'pattern')?.text === base.text)),
-      handlers: (method === 'route' && args[0]?.type === 'object' ? [prop(args[0], 'preHandler'), prop(args[0], 'handler')].filter(Boolean) : rest).map((a) => describe(a, nodeItem)).filter(Boolean),
+      objIsParam: paramIndex >= 0, paramIndex,
+      handlers: (method === 'route' && args[0]?.type === 'object' ? [prop(args[0], 'preHandler'), prop(args[0], 'handler')].filter(Boolean) : rest).flatMap(handlerOf),
       opts: method === 'route' && args[0]?.type === 'object' ? describe(args[0], nodeItem) : null,
       text: short(n.text, 80),
     });
@@ -480,6 +559,33 @@ export function jsExtras(root, ctx) {
     const decos = decoratorsOf(n);
     const names = decos.map(decoName);
     const heritage = n.namedChildren.find((c) => c.type === 'class_heritage')?.text || '';
+    // @Module({ providers: [{ provide: APP_GUARD, useClass: JwtGuard }] }) и configure(consumer)
+    const mod = decos.find((d) => decoName(d) === 'Module');
+    if (mod) {
+      for (const pr of prop(mod.args[0], 'providers')?.namedChildren || []) {
+        const kind = pr.type === 'object' ? prop(pr, 'provide')?.text : null;
+        if (/^APP_(GUARD|PIPE|INTERCEPTOR|FILTER)$/.test(kind || '')) {
+          const ref = describe(prop(pr, 'useClass') || prop(pr, 'useExisting'), nodeItem);
+          if (ref) nestMods.globals.push({ kind, ref, line: line(pr) });
+        }
+      }
+      for (const m of field(n, 'body')?.namedChildren || []) {
+        if (m.type !== 'method_definition' || field(m, 'name')?.text !== 'configure') continue;
+        for (const c of walk(m)) {
+          if (c.type !== 'call_expression' || field(field(c, 'function'), 'property')?.text !== 'forRoutes') continue;
+          const seg = { apply: [], forRoutes: [], exclude: [], line: line(c) };
+          for (let cur = c; cur?.type === 'call_expression'; cur = field(field(cur, 'function'), 'object')) {
+            const nm = field(field(cur, 'function'), 'property')?.text;
+            const as = field(cur, 'arguments')?.namedChildren || [];
+            if (nm === 'apply') seg.apply = as.map((a) => describe(a, nodeItem)).filter(Boolean);
+            if (nm === 'forRoutes') seg.forRoutes = as.map((a) => (strValue(a) !== null ? { path: strValue(a) } : a.type === 'object' ? { path: strValue(prop(a, 'path')) || '', method: prop(a, 'method')?.text?.split('.').pop() || '' } : { ctl: a.text }));
+            if (nm === 'exclude') seg.exclude = as.map((a) => strValue(a) ?? strValue(prop(a, 'path'))).filter((x) => x !== null);
+          }
+          nestMods.mw.push(seg);
+        }
+      }
+      continue;
+    }
     const role = names.includes('Controller') ? 'controller'
       : /implements[^{]*\bCanActivate\b/.test(heritage) ? 'guard'
         : /implements[^{]*\bPipeTransform\b/.test(heritage) ? 'pipe'
@@ -495,6 +601,7 @@ export function jsExtras(root, ctx) {
       prefix: ctl ? strValue(ctl.args[0]) || strValue(prop(ctl.args[0], 'path')) || '' : '',
       guards: listArgs(decos, 'UseGuards'), pipes: listArgs(decos, 'UsePipes'), interceptors: listArgs(decos, 'UseInterceptors'), filters: listArgs(decos, 'UseFilters'),
       methods: [],
+      reflector: /\bReflector\b|getAllAndOverride|IS_PUBLIC/.test(n.text), // guard смотрит на декораторы вроде @Public()
     };
     for (const m of field(n, 'body')?.namedChildren || []) {
       if (m.type !== 'method_definition') continue;
@@ -507,6 +614,7 @@ export function jsExtras(root, ctx) {
         path: http ? strValue(http.args[0]) || '' : null, line: line(m),
         guards: listArgs(ds, 'UseGuards'), pipes: listArgs(ds, 'UsePipes'), interceptors: listArgs(ds, 'UseInterceptors'), filters: listArgs(ds, 'UseFilters'),
         params: paramNames(m).filter((p) => p.deco),
+        decos: ds.map(decoName),
       });
     }
     nest.push(entry);
@@ -527,5 +635,5 @@ export function jsExtras(root, ctx) {
     const fnKey = r.fn && key(r.fn);
     flows[r.id] = flowOf(r.fn, r.body, (x) => own.has(key(x)) && key(x) !== fnKey);
   }
-  return { web: { mounts, vars, nest }, assoc, params, flows, entities };
+  return { web: { mounts, vars, nest, passes, nestMods }, assoc, params, flows, entities };
 }

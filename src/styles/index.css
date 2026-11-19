@@ -36,3 +36,4 @@ body { overflow: hidden; }
 .hljs-attr, .hljs-attribute, .hljs-property { color: #A9C2D8; }
 .hljs-tag, .hljs-name { color: #7FA08A; }
 .hljs-type { color: #7FA8CF; }
+.font-mono { font-variant-ligatures: none; font-feature-settings: 'liga' 0, 'calt' 0; }

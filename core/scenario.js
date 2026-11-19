@@ -121,10 +121,11 @@ export function buildScenario(view, entryId, { depth = 4, maxSteps = 120, index,
   }
   const route = routeOf(view, entryId, method);
   if (route) {
-    const top = push({ id: null, synthetic: true, role: 'request', label: `${route.method} ${route.path}`, about: 'запрос приходит в приложение', file: route.file, line: route.line });
+    const top = push({ id: null, synthetic: true, role: 'request', label: `${route.method} ${route.path}`, about: 'запрос приходит в приложение', file: route.file, line: route.line, ctx: route.cond ? `маршрут есть, только ${route.cond}` : '' });
     for (const st of route.chain) {
-      if (st.id && itemById[st.id]) dfs(st.id, 1, top, { line: 0, kind: 'call', ctx: '', label: st.label }, { role: st.role === 'handler' ? 'controller' : st.role, about: st.about });
-      else push({ id: null, synthetic: true, depth: 1, parent: top, role: st.role, label: st.label, about: st.about, file: st.file, line: st.line || 0 });
+      // st.cond — подключено по условию: if (dev) app.use(...); показываем над шагом, как условия в коде
+      if (st.id && itemById[st.id]) dfs(st.id, 1, top, { line: 0, kind: 'call', ctx: st.cond || '', label: st.label }, { role: st.role === 'handler' ? 'controller' : st.role, about: st.about });
+      else push({ id: null, synthetic: true, depth: 1, parent: top, role: st.role, label: st.label, about: st.about, file: st.file, line: st.line || 0, ctx: st.cond || '' });
     }
     const outs = route.out || [];
     if (outs.some((o) => o.kind === 'response' || o.kind === 'return')) {

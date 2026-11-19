@@ -3,9 +3,13 @@ from flask import Flask
 from .views import bp
 
 
+def register_blueprints(app):
+    app.register_blueprint(bp, url_prefix="/shop")
+
+
 def create_app():
     app = Flask(__name__)
-    app.register_blueprint(bp, url_prefix="/shop")
+    register_blueprints(app)
 
     @app.errorhandler(404)
     def not_found(e):

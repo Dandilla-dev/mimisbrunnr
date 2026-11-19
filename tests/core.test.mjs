@@ -210,7 +210,9 @@ try {
   assert.equal(sc.steps[0].role, 'request');
   assert.equal(sc.steps[0].label, 'POST /api/orders'); // include_router(router, prefix="/api")
   const roles = sc.steps.filter((x) => x.depth === 1).map((x) => x.role);
-  assert.deepEqual(roles.slice(0, 6), ['middleware', 'middleware', 'router', 'validate', 'dependency', 'controller']); // CORS, timing, роутер, OrderIn, get_db, обработчик
+  assert.deepEqual(roles.slice(0, 7), ['middleware', 'middleware', 'middleware', 'router', 'validate', 'dependency', 'controller']); // CORS, GZip, timing, роутер, OrderIn, get_db, обработчик
+  assert.equal(sc.steps.find((x) => x.label === 'GZipMiddleware').ctx, 'если not DEBUG');
+  assert.ok(!sc.route.guess && !sc.route.incomplete); // for r in (router,): app.include_router(r, prefix="/api")
   const order = sc.steps.filter((x) => x.id).map((x) => x.id.split('::')[1]);
   // Depends(get_db) выполняется до обработчика; дальше — шаги обработчика по порядку строк
   assert.ok(order.indexOf('get_db') < order.indexOf('create_order'));
@@ -256,16 +258,22 @@ try {
   const ex = await web('web_express');
   const rt = (sess, m, p) => sess.web.routes.find((r) => r.method === m && r.path === p);
   const post = rt(ex, 'POST', '/api/books');
-  assert.deepEqual(post.chain.map((x) => x.role), ['middleware', 'middleware', 'auth', 'router', 'validate', 'handler']);
+  assert.deepEqual(post.chain.map((x) => x.role), ['middleware', 'middleware', 'middleware', 'auth', 'router', 'validate', 'handler']);
+  assert.equal(post.chain[2].cond, "если process.env.NODE_ENV !== 'production'"); // if (...) app.use(morgan('dev'))
   assert.equal(post.chain[0].label, 'express.json()');
   assert.ok(post.errors.some((x) => x.id === 'src/middlewares/error.middleware.js::errorHandler'));
   assert.ok(rt(ex, 'DELETE', '/api/readers/:id')); // router.route('/readers/:id').get().delete()
-  assert.deepEqual(rt(ex, 'GET', '/api/books/:isbn').chain.map((x) => x.role), ['middleware', 'middleware', 'auth', 'router', 'validate', 'handler']); // [checkIsbn]
+  assert.deepEqual(rt(ex, 'GET', '/api/books/:isbn').chain.map((x) => x.role), ['middleware', 'middleware', 'middleware', 'auth', 'router', 'validate', 'handler']); // [checkIsbn]
   const stats = rt(ex, 'GET', '/admin/stats'); // вложенное приложение: с префиксом и общими обработчиками
   assert.ok(stats && !stats.incomplete && stats.chain[0].label === 'express.json()');
   assert.ok(!rt(ex, 'GET', '/stats')); // и не дублируется как отдельное приложение
-  const daily = rt(ex, 'GET', '/daily'); // подключён в цикле — честно помечен
-  assert.ok(daily.incomplete && /server\.js:\d+/.test(daily.reason));
+  const daily = rt(ex, 'GET', '/reports/daily'); // for (const r of [reportRoutes]) app.use('/reports', r)
+  assert.ok(daily && !daily.incomplete && /в цикле/.test(daily.chain.find((x) => x.role === 'router').about));
+  const v2 = rt(ex, 'GET', '/api/v2/ping'); // registerRoutes(app)
+  assert.ok(v2 && !v2.incomplete && v2.errors.some((x) => x.id === 'src/middlewares/error.middleware.js::errorHandler'));
+  assert.ok(rt(ex, 'GET', '/health') && !rt(ex, 'GET', '/health').incomplete); // require('./mount.cjs')(app)
+  const old = rt(ex, 'GET', '/old'); // список плагинов из чужого пакета — честно помечен
+  assert.ok(old.incomplete && /server\.js:\d+/.test(old.reason));
   assert.ok(post.chain.every((x) => x.role !== 'unknown') && rt(ex, 'GET', '/admin/stats').chain.every((x) => x.role !== 'unknown'));
   assert.ok(!post.incomplete && !post.guess);
   const exE = Object.fromEntries(ex.entities.map((e) => [e.id.split('::')[1], e]));
@@ -290,8 +298,11 @@ try {
 
   const ne = await web('web_nest');
   const nr = rt(ne, 'GET', '/api/books/:id');
-  assert.deepEqual(nr.chain.map((x) => x.role), ['auth', 'middleware', 'validate', 'validate', 'handler']);
-  assert.equal(nr.chain[0].id, 'src/common/api-key.guard.ts::ApiKeyGuard.canActivate');
+  assert.deepEqual(nr.chain.map((x) => x.role), ['middleware', 'auth', 'auth', 'middleware', 'validate', 'validate', 'handler']);
+  assert.equal(nr.chain[0].id, 'src/common/logger.middleware.ts::LoggerMiddleware.use'); // consumer.apply().forRoutes('books')
+  assert.equal(nr.chain[1].id, 'src/common/jwt-auth.guard.ts::JwtAuthGuard.canActivate'); // APP_GUARD
+  assert.match(nr.chain[1].about, /@Public/);
+  assert.equal(nr.chain[2].id, 'src/common/api-key.guard.ts::ApiKeyGuard.canActivate');
   assert.ok(hasEdge(ne, 'src/books/books.controller.ts::BooksController.findOne', 'src/books/books.service.ts::BooksService.findOne')); // constructor(private booksService)
   const neE = Object.fromEntries(ne.entities.map((e) => [e.id.split('::')[1], e]));
   assert.equal(neE.Book.orm, 'typeorm');

@@ -130,6 +130,28 @@ export function pyWebFacts(root) {
   const vars = {}; // имя → { kind, fw, prefix, deps }
   const calls = []; // include_router / register_blueprint / add_middleware
   const decorated = []; // { fn, decs: [{ obj, method, path, kwargs, text }], params }
+  const passes = []; // register_routers(app): приложение передано в функцию
+  // значения имён уровня модуля — для «for m in ROUTERS», где ROUTERS = (a, b)
+  const modVal = {};
+  for (const st of root.namedChildren) {
+    const a = st.type === 'expression_statement' ? st.namedChild(0) : null;
+    if (a?.type === 'assignment' && field(a, 'left')?.type === 'identifier') modVal[field(a, 'left').text] ??= field(a, 'right');
+  }
+  const listItems = (n, d = 0) => (!n || d > 2 ? null : ['list', 'tuple', 'set'].includes(n.type) ? n.namedChildren : n.type === 'identifier' ? listItems(modVal[n.text], d + 1) : null);
+  // где стоит вызов: функция (и её параметры), условие, цикл
+  function placeOf(n) {
+    const conds = [];
+    let loop = null, fn = null;
+    for (let c = n, p = n.parent; p; c = p, p = p.parent) {
+      if (p.type === 'function_definition') { fn = p; break; }
+      if (p.type === 'if_statement' && field(p, 'consequence') && field(p, 'consequence').startIndex === c.startIndex) conds.unshift(`если ${short(field(p, 'condition')?.text, 50)}`);
+      if (p.type === 'elif_clause') conds.unshift(`если ${short(field(p, 'condition')?.text, 50)}`);
+      if (p.type === 'else_clause' && p.parent?.type === 'if_statement') conds.unshift(`если не ${short(field(p.parent, 'condition')?.text, 50)}`);
+      if (p.type === 'for_statement' && !loop) loop = { var: field(p, 'left')?.text || '', items: listItems(field(p, 'right')) };
+    }
+    const params = fn ? (field(fn, 'parameters')?.namedChildren || []).map((x) => (x.type === 'identifier' ? x.text : (field(x, 'name') || x.namedChild(0))?.text)).filter(Boolean) : [];
+    return { cond: conds.join(' и '), loop, fn: fn ? field(fn, 'name')?.text : null, fnTop: fn?.parent?.type === 'module' || fn?.parent?.parent?.type === 'module', params };
+  }
   for (const n of walk(root)) {
     if (n.type === 'assignment') {
       const l = field(n, 'left'), r = field(n, 'right');
@@ -145,11 +167,29 @@ export function pyWebFacts(root) {
       const f = field(n, 'function');
       const m = field(f, 'attribute')?.text;
       const obj = field(f, 'object')?.text;
+      const at = placeOf(n);
+      const place = { cond: at.cond, fn: at.fnTop ? at.fn : null, objIsParam: Boolean(at.fnTop && at.params.includes(obj)) };
       if (['include_router', 'register_blueprint'].includes(m)) {
         const what = pos(n)[0];
-        calls.push({ obj, method: m, target: what?.text || '', prefix: str(kw(n, m === 'include_router' ? 'prefix' : 'url_prefix')) || '', deps: depsList(kw(n, 'dependencies')), line: line(n) });
+        const t = what?.text || '';
+        // for module in (assistant, auth): app.include_router(module.router) → каждый элемент списка
+        let targets = null;
+        if (at.loop?.items && at.loop.var && (t === at.loop.var || t.startsWith(`${at.loop.var}.`))) targets = at.loop.items.map((x) => x.text + t.slice(at.loop.var.length));
+        calls.push({ obj, method: m, target: t, targets, loopVar: targets ? at.loop.var : '', prefix: str(kw(n, m === 'include_router' ? 'prefix' : 'url_prefix')) || '', deps: depsList(kw(n, 'dependencies')), line: line(n), ...place });
       } else if (m === 'add_middleware') {
-        calls.push({ obj, method: m, target: pos(n)[0]?.text || '', line: line(n), text: short(n.text, 60) });
+        calls.push({ obj, method: m, target: pos(n)[0]?.text || '', line: line(n), text: short(n.text, 60), ...place });
+      }
+    }
+    if (n.type === 'call') {
+      // register_routers(app) — функция получает приложение
+      const f = field(n, 'function');
+      const ft = f?.text || '';
+      if (f && !/\.(include_router|register_blueprint|add_middleware|route|get|post|put|patch|delete|run|listen)$/.test(ft) && !APP_RE.test(ft) && !ROUTER_RE.test(ft)) {
+        const at = placeOf(n);
+        pos(n).forEach((a, i) => {
+          if (a.type !== 'identifier' || !(vars[a.text] || at.params.includes(a.text) || /^(app|application|api|bp|blueprint|router)$/.test(a.text))) return;
+          passes.push({ callee: ft, arg: a.text, argIndex: i, line: line(n), fn: at.fnTop ? at.fn : null, argIsParam: Boolean(at.fnTop && at.params.includes(a.text) && !vars[a.text]), cond: at.cond, text: short(n.text, 60) });
+        });
       }
     } else if (n.type === 'decorated_definition') {
       const fn = field(n, 'definition');
@@ -181,7 +221,7 @@ export function pyWebFacts(root) {
       decorated.push({ fn: field(fn, 'name').text, line: line(n), decs, params, top: n.parent?.type === 'module' });
     }
   }
-  return { vars, calls, decorated };
+  return { vars, calls, decorated, passes };
 }
 
 // ---------------------------------------------------------------- поток данных

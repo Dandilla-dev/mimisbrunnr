@@ -259,6 +259,7 @@ export function ScenarioView({ view, ix, id, method }) {
           {step.synthetic ? (
             <>
               <div className="mt-4 flex items-center gap-2 flex-wrap"><RoleChip role={step.role} /><h2 className="font-mono text-[17px] break-all">{step.label}</h2></div>
+              {step.ctx && <div className="text-[13px] text-bronze/90 mt-2">Подключается не всегда — <span className="font-mono">{step.ctx}</span>. Какое значение будет при запуске, по коду не узнать.</div>}
               {step.about && <div className="text-[13.5px] text-stone mt-2 leading-relaxed whitespace-pre-wrap">{step.about}</div>}
               {step.role === 'request' && route && <div className="text-[13px] text-mist mt-2 leading-relaxed">{route.incomplete || route.guess ? 'Дальше по шагам — то, что точно видно в коде: ' : 'Дальше по шагам — всё, через что пройдёт запрос: '}{route.chain.map((c) => ROLE_RU[c.role === 'handler' ? 'controller' : c.role]).join(' → ')}{route.errors?.length ? ', а при ошибке — обработчик ошибок' : ''}.</div>}
             </>
@@ -271,6 +272,7 @@ export function ScenarioView({ view, ix, id, method }) {
               </div>
               <div className="font-mono text-[11px] text-mist-dim mt-1">{it.file}:{it.line}–{it.end}</div>
               {step.about && <div className="text-[13px] text-mist mt-1.5">{step.about}</div>}
+              {step.ctx && !(parent && step.line > 0) && <div className="text-[13px] text-bronze/90 mt-1.5">Подключается не всегда — <span className="font-mono">{step.ctx}</span>.</div>}
               {parent && step.line > 0 && pit && (
                 <div className="text-[13px] text-mist mt-2 leading-relaxed">
                   {step.kind === 'ref' ? 'Передаётся из ' : 'Вызывается из '}

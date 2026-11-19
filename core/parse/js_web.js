@@ -42,10 +42,17 @@ export function jsWeb(jsFiles, R, sites) {
   for (const [file, facts] of Object.entries(jsFiles)) {
     for (const m of facts.web?.mounts || []) (containers[keyOf(file, m)] ||= { file, mounts: [] }).mounts.push(m);
   }
+  // registerRoutes(app): вызов функции с приложением — «подключение» в этом месте
+  for (const [file, facts] of Object.entries(jsFiles)) {
+    for (const p of facts.web?.passes || []) {
+      const ck = p.argIsParam && p.container ? `fn:${p.container}` : `var:${file}:${p.arg}`;
+      (containers[ck] ||= { file, mounts: [] }).mounts.push({ method: '__call', line: p.line, handlers: [p.callee], cond: p.cond, text: p.text, path: null });
+    }
+  }
   for (const c of Object.values(containers)) c.mounts.sort((a, b) => a.line - b.line);
   const varInfo = (file, name) => jsFiles[file]?.web?.vars?.[name] || null;
   // router.get('/', [auth, validate], handler) — список раскрываем в отдельные шаги
-  const flat = (hs) => hs.flatMap((h) => (h?.t === 'array' ? h.items : [h]));
+  const flat = (hs) => hs.flatMap((h) => (h?.t === 'array' ? h.items.map((x) => (h.loop ? { ...x, loop: h.loop } : x)) : [h]));
 
   // имя обработчика → что это: роутер, плагин, функция проекта или внешний middleware
   function resolveRef(file, h) {
@@ -89,6 +96,12 @@ export function jsWeb(jsFiles, R, sites) {
       if (inner?.id) return { id: inner.id, label: h.text, factory: true };
       return { label: h.text, ext: true, about: known(h.text) };
     }
+    if (h.t === 'require') {
+      const tf = h.source && R.resolveSource(file, h.source);
+      const id = tf && R.exported(tf, 'default');
+      if (id) return containers[`fn:${id}`] ? { container: `fn:${id}`, id } : { id, label: '' };
+      return { label: `require('${h.source}')`, unknown: true };
+    }
     if (h.t === 'new') {
       const id = R.resolveName(file, null, h.name);
       return id ? { id, label: h.text } : { label: h.text, ext: true, about: known(h.text) };
@@ -112,12 +125,20 @@ export function jsWeb(jsFiles, R, sites) {
   // ---- Express / Fastify: обход от приложения по use / register ----
   const reached = new Set();
   const vague = []; // app.use(r), где r — неизвестно что (цикл, параметр): место для честной пометки
-  function walkContainer(ck, prefix, before, errors, fw, depth = 0, flags = null) {
+  const both = (...cs) => cs.filter(Boolean).join(' и ');
+  function walkContainer(ck, prefix, before, errors, fw, depth = 0, flags = null, cond0 = '', inline = false) {
     const c = containers[ck];
-    if (!c || depth > 8 || reached.has(`${ck}@${prefix}`)) return;
+    if (!c || depth > 8 || (!inline && reached.has(`${ck}@${prefix}`))) return before;
     reached.add(`${ck}@${prefix}`);
-    const local = [...before];
+    let local = [...before];
     for (const m of c.mounts) {
+      const mc = both(cond0, m.cond);
+      if (m.method === '__call') {
+        // функция, которой передали приложение: всё, что она подключает, идёт сюда же и по порядку
+        const ref = resolveRef(c.file, m.handlers[0]);
+        if (ref?.container?.startsWith('fn:')) local = walkContainer(ref.container, prefix, local, errors, fw, depth + 1, flags, mc, true);
+        continue;
+      }
       if (m.method === 'setErrorHandler') {
         for (const h of m.handlers) { const ref = resolveRef(c.file, h); if (ref) { errors.push(step('error', ref, { file: c.file, line: m.line })); if (ref.id) roles[ref.id] = 'error'; } }
         continue;
@@ -135,19 +156,20 @@ export function jsWeb(jsFiles, R, sites) {
         for (const h of flat(hooks)) {
           const ref = resolveRef(c.file, h);
           if (!ref) continue;
+          const hc = both(mc, h.cond);
           if (ref.container) {
             const what = ref.subapp ? 'вложенное приложение' : '';
-            const rs = { role: 'router', id: ref.id || null, label: h.name || h.text || '', about: `${what ? `${what}, ` : ''}${path ? `подключён по адресу ${joinPath(prefix, path)}` : 'подключён к приложению'}`, file: c.file, line: m.line };
-            walkContainer(ref.container, joinPath(prefix, path), [...local, rs], errors, fw, depth + 1, flags);
+            const rs = { role: 'router', id: ref.id || null, label: h.name || h.text || '', about: `${what ? `${what}, ` : ''}${path ? `подключён по адресу ${joinPath(prefix, path)}` : 'подключён к приложению'}${h.loop ? ` (в цикле по списку, переменная ${h.loop})` : ''}`, file: c.file, line: m.line, cond: hc };
+            walkContainer(ref.container, joinPath(prefix, path), [...local, rs], errors, fw, depth + 1, flags, hc);
             continue;
           }
           if (ref.unknown) {
             vague.push({ file: c.file, line: m.line, text: m.text });
-            local.push({ role: 'unknown', id: null, label: ref.label, about: 'здесь подключается переменная, и что в ней — разбор не знает (например, роутер из цикла). Если это роутер, его маршруты показаны с пометкой «путь неполный».', file: c.file, line: m.line, under: path ? joinPath(prefix, path) : null });
+            local.push({ role: 'unknown', id: null, label: ref.label, about: 'здесь подключается переменная, и что в ней — разбор не знает (например, роутер из списка, который собирается в другом месте). Если это роутер, его маршруты показаны с пометкой «путь неполный».', file: c.file, line: m.line, under: path ? joinPath(prefix, path) : null, cond: hc });
             continue;
           }
           const p = ref.id ? params(ref.id) : null;
-          const wrapped = { file: c.file, line: m.line, text: m.text, under: path ? joinPath(prefix, path) : null };
+          const wrapped = { file: c.file, line: m.line, text: m.text, under: path ? joinPath(prefix, path) : null, cond: hc };
           if (fw === 'express' && p === 4) { errors.push(step('error', ref, wrapped)); if (ref.id) roles[ref.id] = 'error'; continue; }
           if (m.method === 'addHook') wrapped.hook = m.path || '';
           const role = guessRole(ref, h.text || h.name || ref.label, 'middleware');
@@ -173,13 +195,14 @@ export function jsWeb(jsFiles, R, sites) {
         if (!ref) return;
         const last = i === handlers.length - 1;
         const role = last ? 'handler' : guessRole(ref, h.text || h.name, 'middleware');
-        chain.push(step(role, ref, { file: c.file, line: m.line }));
+        chain.push(step(role, ref, { file: c.file, line: m.line, cond: h.cond || '' }));
         if (ref.id) roles[ref.id] ??= last ? 'controller' : role;
       });
       const method = (m.method === 'route' ? (m.opts?.text?.match(/method\s*:\s*['"`](\w+)/) || [])[1] || 'GET' : m.method).toUpperCase();
-      routes.push({ id: m.routeId, method, path: full, fw, file: c.file, line: m.line, chain, errors, ...(flags || {}) });
+      routes.push({ id: m.routeId, method, path: full, fw, file: c.file, line: m.line, chain, errors, ...(flags || {}), ...(mc ? { cond: mc } : {}) });
       roles[m.routeId] = 'route';
     }
+    return local;
   }
   const BUILTIN = {
     express: { role: 'error', id: null, label: 'встроенный обработчик Express', about: 'если ошибку никто не обработал — ответ 500 с текстом ошибки' },
@@ -215,8 +238,17 @@ export function jsWeb(jsFiles, R, sites) {
   // ---- NestJS ----
   const nestClasses = {};
   for (const facts of Object.values(jsFiles)) for (const n of facts.web?.nest || []) nestClasses[n.id] = n;
-  const globals = { prefix: '', guards: [], pipes: [], interceptors: [], filters: [], middleware: [] };
+  const globals = { prefix: '', guards: [], pipes: [], interceptors: [], filters: [], middleware: [], consumer: [] };
   for (const [file, facts] of Object.entries(jsFiles)) {
+    for (const g of facts.web?.nestMods?.globals || []) {
+      const ref = resolveRef(file, g.ref);
+      if (!ref) continue;
+      const x = { ...ref, text: g.ref.name || g.ref.text || '', via: g.kind };
+      ({ APP_GUARD: globals.guards, APP_PIPE: globals.pipes, APP_INTERCEPTOR: globals.interceptors, APP_FILTER: globals.filters })[g.kind]?.push(x);
+    }
+    for (const seg of facts.web?.nestMods?.mw || []) {
+      for (const a of seg.apply) { const ref = resolveRef(file, a); if (ref) globals.consumer.push({ ref: { ...ref, text: a.name || a.text || '' }, forRoutes: seg.forRoutes, exclude: seg.exclude, file, line: seg.line }); }
+    }
     for (const [name, v] of Object.entries(facts.web?.vars || {})) {
       if (v.fw !== 'nest') continue;
       for (const m of containers[`var:${file}:${name}`]?.mounts || []) {
@@ -246,8 +278,20 @@ export function jsWeb(jsFiles, R, sites) {
       for (const m of ctl.methods) {
         if (!m.http) continue;
         const chain = [];
+        const local = joinPath(ctl.prefix, m.path).replace(/^\//, '');
+        // consumer.apply(Mw).exclude(...).forRoutes('books' | BooksController | { path, method })
+        const hits = (pat) => { const p = String(pat || '').replace(/^\//, '').replace(/\/$/, ''); return p === '*' || p === '(.*)' || local === p || local.startsWith(`${p.replace(/\/?\*$|\(\.\*\)$/, '')}/`) || (p.endsWith('*') && local.startsWith(p.slice(0, -1))) || (/\*$/.test(p) && local === p.replace(/\/?\*$/, '')); };
+        const applies = (x) => x.forRoutes.some((r) => (r.ctl ? r.ctl === ctl.name : hits(r.path) && (!r.method || r.method === 'ALL' || r.method === m.http))) && !x.exclude.some((e) => hits(e));
         for (const x of globals.middleware) chain.push(step(guessRole(x, x.text, 'middleware'), methodOf(x, 'use'), { label: x.label || x.text }));
-        for (const x of [...globals.guards, ...res(ctl.guards), ...res(m.guards)]) chain.push(step('auth', methodOf(x, 'canActivate'), { label: x.label || x.text, about: x.about || 'guard: решает, пускать ли запрос дальше' }));
+        for (const x of globals.consumer.filter(applies)) chain.push(step(guessRole(x.ref, x.ref.text, 'middleware'), methodOf(x.ref, 'use'), { label: x.ref.label || x.ref.text, about: 'middleware модуля: consumer.apply(…).forRoutes(…)', file: x.file, line: x.line }));
+        const pub = (m.decos || []).find((d) => /^(Public|SkipAuth|AllowAnonymous|IsPublic|NoAuth)$/.test(d));
+        const guardAbout = (x) => {
+          const cls = nestClasses[x.id];
+          const base = x.about || (x.via === 'APP_GUARD' ? 'глобальный guard (APP_GUARD): проверяет каждый запрос' : 'guard: решает, пускать ли запрос дальше');
+          if (pub && cls?.reflector) return `${base}. Маршрут помечен @${pub}() — этот guard смотрит на такие пометки и, скорее всего, пропускает маршрут без проверки.`;
+          return cls?.reflector ? `${base}. Он смотрит на декораторы маршрута: помеченные, например, @Public() может пропускать.` : base;
+        };
+        for (const x of [...globals.guards, ...res(ctl.guards), ...res(m.guards)]) chain.push(step('auth', methodOf(x, 'canActivate'), { label: x.label || x.text, about: guardAbout(x) }));
         for (const x of [...globals.interceptors, ...res(ctl.interceptors), ...res(m.interceptors)]) chain.push(step('middleware', methodOf(x, 'intercept'), { label: x.label || x.text, about: 'interceptor: работает до и после обработчика' }));
         for (const x of [...globals.pipes, ...res(ctl.pipes), ...res(m.pipes)]) chain.push(step('validate', methodOf(x, 'transform'), { label: x.label || x.text, about: x.about || 'pipe: проверяет и преобразует данные запроса' }));
         for (const p of m.params) {
