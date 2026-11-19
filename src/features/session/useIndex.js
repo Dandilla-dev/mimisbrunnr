@@ -2,7 +2,7 @@
 import { useMemo } from 'react';
 import { sitesIndex } from '../../../core/scenario.js';
 
-export const KIND_RU = { function: 'функция', method: 'метод', class: 'класс', component: 'компонент', hook: 'хук', route: 'маршрут' };
+export const KIND_RU = { function: 'функция', method: 'метод', class: 'класс', component: 'компонент', hook: 'хук', route: 'маршрут', entity: 'сущность' };
 
 export function useIndex(view) {
   return useMemo(() => {

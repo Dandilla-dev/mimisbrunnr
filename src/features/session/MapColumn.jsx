@@ -1,7 +1,7 @@
 // Левая колонка: схема проекта — слои, у каждого файлы и функции.
 import { useDispatch, useSelector } from 'react-redux';
 import { go, home } from '../../app/store';
-import { AlertIcon, BookIcon, PathIcon, ScrollIcon } from '../../components/icons';
+import { AlertIcon, BookIcon, PathIcon, ScrollIcon, TableIcon } from '../../components/icons';
 
 const LAYER_COLORS = ['#B98D55', '#5C82A6', '#7FA08A', '#C9A7D9', '#D98787', '#A9C2D8', '#C8B27A', '#8FB59A', '#9AA5C9', '#D6A57A'];
 
@@ -26,7 +26,8 @@ export default function MapColumn({ view, ix }) {
     <aside className="w-[300px] flex-shrink-0 border-r border-hairline-soft overflow-y-auto scroll-thin px-3.5 py-4">
       <div className="flex flex-col gap-0.5 mb-5">
         {navBtn(top.t === 'overview', () => dispatch(home()), ScrollIcon, 'Обзор проекта')}
-        {navBtn(top.t === 'scenarios' || top.t === 'scenario', () => dispatch(go({ t: 'scenarios' })), PathIcon, 'Сценарии')}
+        {navBtn(top.t === 'scenarios' || top.t === 'scenario', () => dispatch(go({ t: 'scenarios' })), PathIcon, view.web?.routes?.length ? 'Сценарии и запросы' : 'Сценарии', view.web?.routes?.length ? <span className="font-mono text-[10.5px] text-mist-dim">{view.web.routes.length}</span> : null)}
+        {view.entities?.length > 0 && navBtn(top.t === 'entities', () => dispatch(go({ t: 'entities' })), TableIcon, 'Сущности', <span className="font-mono text-[10.5px] text-mist-dim">{view.entities.length}</span>)}
         {navBtn(top.t === 'todo', () => dispatch(go({ t: 'todo' })), AlertIcon, 'Требует внимания', attention ? <span className="font-mono text-[10.5px] text-bronze">{attention}</span> : null)}
         {navBtn(top.t === 'terms', () => dispatch(go({ t: 'terms' })), BookIcon, 'Словарь терминов', view.terms.length ? <span className="font-mono text-[10.5px] text-mist-dim">{view.terms.length}</span> : null)}
       </div>

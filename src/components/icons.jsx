@@ -43,3 +43,6 @@ export const PathIcon = (p) => (
 export const NextIcon = (p) => (
   <svg {...base} {...p}><path d="M9 6l6 6-6 6" /></svg>
 );
+export const TableIcon = (p) => (
+  <svg {...base} {...p}><rect x="4" y="5" width="16" height="14" rx="2" /><line x1="4" y1="10" x2="20" y2="10" /><line x1="10" y1="10" x2="10" y2="19" /></svg>
+);

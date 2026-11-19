@@ -1,7 +1,7 @@
 // Рассказ сценария от ИИ: модель получает готовую цепочку шагов (её строит код,
 // не модель) и код этих функций и пишет связный текст — по фразе на шаг.
 import { callModel, costOf, extractJson, LlmError } from './llm.js';
-import { buildScenario } from './scenario.js';
+import { buildScenario, ROLE_RU } from './scenario.js';
 import { SYSTEM_PROMPT } from './explain.js';
 
 const CHARS_PER_TOKEN = 3;
@@ -17,17 +17,19 @@ export function storyPrompt(view, getCode, sc) {
   const itemById = Object.fromEntries(view.items.map((i) => [i.id, i]));
   const entry = itemById[sc.entry];
   const stepLines = sc.steps.map((s) => {
-    const it = itemById[s.id];
     const pad = '  '.repeat(s.depth);
-    const how = s.depth === 0 ? '' : `${s.kind === 'ref' ? 'передаётся (вызовется позже)' : 'вызывается'}${s.line ? ` в строке ${s.line}` : ''}${s.ctx ? `, внутри «${s.ctx}»` : ''}; `;
+    const role = s.role ? `[${ROLE_RU[s.role] || s.role}] ` : '';
+    if (!s.id) return `${pad}${s.n}. ${role}${s.label}${s.about ? ` — ${s.about.replace(/\n/g, '; ')}` : ''}`;
+    const it = itemById[s.id];
+    const how = s.depth === 0 || !s.line ? '' : `${s.kind === 'ref' ? 'передаётся (вызовется позже)' : 'вызывается'} в строке ${s.line}${s.ctx ? `, внутри «${s.ctx}»` : ''}; `;
     const note = s.repeat ? ' (уже было выше)' : s.cut ? ' (дальше не раскрыто)' : '';
-    return `${pad}${s.n}. ${how}${it.name} — ${it.file}:${it.line}${note}`;
+    return `${pad}${s.n}. ${role}${how}${s.label ? `${s.label} → ` : ''}${it.name} — ${it.file}:${it.line}${note}${s.about ? ` (${s.about})` : ''}`;
   }).join('\n');
   let budget = MAX_CODE_CHARS;
   const blocks = [];
   const done = new Set();
   for (const s of sc.steps) {
-    if (done.has(s.id) || budget <= 0) continue;
+    if (!s.id || done.has(s.id) || budget <= 0) continue;
     done.add(s.id);
     const it = itemById[s.id];
     const code = (getCode(it.file) || '').split('\n');
@@ -38,7 +40,8 @@ export function storyPrompt(view, getCode, sc) {
     budget -= text.length;
     blocks.push(`<code name="${it.name}" file="${it.file}">\n${text}\n</code>`);
   }
-  return `Проект: ${view.title}. Разбираем сценарий — путь выполнения, который начинается с ${entry.name} (${entry.file}:${entry.line}${entry.route ? `, ${entry.route}` : ''}).
+  const start = sc.route ? `запроса ${sc.route.method} ${sc.route.path} (обработчик ${entry.name}, ${entry.file}:${entry.line})` : `${entry.name} (${entry.file}:${entry.line}${entry.route ? `, ${entry.route}` : ''})`;
+  return `Проект: ${view.title}. Разбираем сценарий — путь выполнения ${start}.${sc.route ? ' Это веб-приложение: расскажи, как запрос проходит по шагам — промежуточные обработчики, проверки, обработчик, работа с базой, ответ клиенту и что будет при ошибке.' : ''}
 
 Шаги сценария. Их нашёл разбор кода, а не ты: порядок — как в коде, отступ — вложенность вызовов.
 ${stepLines}

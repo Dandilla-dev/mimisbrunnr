@@ -7,6 +7,8 @@ import CodeView from '../../components/CodeView';
 import { BackIcon, SparkIcon, CodeIcon, PathIcon } from '../../components/icons';
 import { ScenarioList, ScenarioView } from './Scenarios';
 import { useCode } from './useCode';
+import Inside from './Inside';
+import { EntitiesView, EntityInfo } from './Entities';
 import ErrorBoundary from '../../components/ErrorBoundary';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
@@ -50,8 +52,12 @@ function Crumbs({ view, ix }) {
     const lay = ix.fileByPath[it.file]?.layer;
     add(layerName(lay), { t: 'layer', id: lay }); add(it.file, { t: 'file', file: it.file }); add(it.name);
   }
+  if (top.t === 'entities') add('Сущности');
   if (top.t === 'scenarios') add('Сценарии');
-  if (top.t === 'scenario') { add('Сценарии', { t: 'scenarios' }); add(ix.itemById[top.id]?.name || ''); }
+  if (top.t === 'scenario') {
+    const r = (view.web?.routes || []).find((x) => x.id === top.id && (!top.method || x.method === top.method));
+    add('Сценарии', { t: 'scenarios' }); add(r ? `${r.method} ${r.path}` : ix.itemById[top.id]?.name || '');
+  }
   if (top.t === 'todo') add('Требует внимания');
   if (top.t === 'terms') add('Словарь');
   return (
@@ -239,7 +245,10 @@ function FnView({ view, ix, id, onExplain }) {
   const code = useCode(view, it.file);
   const [editing, setEditing] = useState(false);
   const [whole, setWhole] = useState(false);
-  useEffect(() => { setEditing(false); setWhole(false); }, [id]);
+  const [mark, setMark] = useState(null); // строки, подсвеченные из «Что внутри»
+  useEffect(() => { setEditing(false); setWhole(false); setMark(null); }, [id]);
+  const ent = it.kind === 'entity' ? (view.entities || []).find((e) => e.id === id) : null;
+  const markLines = (m) => { setWhole(false); setMark(m); };
   const callers = ix.callers[id] || [];
   const calls = ix.calls[id] || [];
 
@@ -266,7 +275,7 @@ function FnView({ view, ix, id, onExplain }) {
           </div>
           {code === null ? <div className="text-mist text-[13px]">Загружаю код…</div> : whole
             ? <CodeView code={code} lang={f.lang} mark={[it.line, it.end]} focus={it.line} maxHeight="70vh" />
-            : <CodeView code={code} lang={f.lang} from={it.line} to={it.end} maxHeight="70vh" />}
+            : <CodeView code={code} lang={f.lang} from={it.line} to={it.end} mark={mark || undefined} focus={mark?.[0]} maxHeight="70vh" />}
         </div>
 
         <div className="min-w-0">
@@ -292,9 +301,11 @@ function FnView({ view, ix, id, onExplain }) {
                 </div>
               )}
               {expl?.phrase && <p className="font-display text-[16.5px] leading-snug">{expl.phrase}</p>}
-              {expl && <Sec n="1" title="Что делает"><p className="text-[14px] leading-relaxed">{expl.what}</p></Sec>}
-              {expl && <Sec n="2" title="Что на входе и что на выходе"><p className="text-[14px] leading-relaxed">{expl.io}</p></Sec>}
-              <Sec n="3" title="Связи">
+              {expl && <Sec n="1" title={ent ? "Что хранит" : "Что делает"}><p className="text-[14px] leading-relaxed">{expl.what}</p></Sec>}
+              {expl && <Sec n="2" title={ent ? 'Поля простыми словами' : 'Что на входе и что на выходе'}><p className="text-[14px] leading-relaxed whitespace-pre-wrap">{expl.io}</p></Sec>}
+              {ent && <Sec n="3" title="Поля и связи (из кода)"><EntityInfo view={view} ix={ix} e={ent} /></Sec>}
+              {!ent && it.kind !== 'class' && <Sec n="3" title="Что внутри: данные и переменные"><Inside view={view} it={it} onMark={markLines} /></Sec>}
+              <Sec n="4" title="Связи">
                 <FnDiagram view={view} ix={ix} id={id} />
                 <div className="text-[12px] text-mist mb-1.5 mt-4">Кто вызывает</div>{links(callers, (x) => ix.edgeKind[`${x}>${id}`])}
                 <div className="text-[12px] text-mist mb-1.5 mt-3">Кого вызывает</div>{links(calls, (x) => ix.edgeKind[`${id}>${x}`])}
@@ -302,8 +313,8 @@ function FnView({ view, ix, id, onExplain }) {
                   <button className="btn mt-4" onClick={() => dispatch(go({ t: 'scenario', id }))}><PathIcon className="w-4 h-4" />Пройти сценарий отсюда</button>
                 )}
               </Sec>
-              {expl && <Sec n="4" title="Пример"><div className="text-[13.5px] leading-relaxed bg-panel-2 border border-hairline-soft rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.example}</div></Sec>}
-              {expl && <Sec n="5" title="На что обратить внимание"><div className="text-[13.5px] leading-relaxed bg-bronze-dim border border-bronze/25 rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.watch}</div></Sec>}
+              {expl && <Sec n="5" title="Пример"><div className="text-[13.5px] leading-relaxed bg-panel-2 border border-hairline-soft rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.example}</div></Sec>}
+              {expl && <Sec n="6" title="На что обратить внимание"><div className="text-[13.5px] leading-relaxed bg-bronze-dim border border-bronze/25 rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.watch}</div></Sec>}
               {expl && (
                 <div className="flex items-center gap-3 mt-5 text-[11.5px] text-mist-dim flex-wrap">
                   <span>{expl.edited ? 'Исправлено вручную' : `Написано: ${expl.model || 'ИИ'}`} · коммит {expl.commit_short} · {expl.updated}</span>
@@ -367,8 +378,9 @@ export default function Panel({ view, ix, onExplain }) {
   if (top.t === 'layer') body = <LayerView view={view} ix={ix} id={top.id} />;
   else if (top.t === 'file' && ix.fileByPath[top.file]) body = <FileView key={top.file} view={view} ix={ix} file={top.file} onExplain={onExplain} />;
   else if (top.t === 'fn' && ix.itemById[top.id]) body = <FnView view={view} ix={ix} id={top.id} onExplain={onExplain} />;
+  else if (top.t === 'entities') body = <EntitiesView view={view} ix={ix} />;
   else if (top.t === 'scenarios') body = <ScenarioList view={view} ix={ix} />;
-  else if (top.t === 'scenario' && ix.itemById[top.id]) body = <ScenarioView key={top.id} view={view} ix={ix} id={top.id} />;
+  else if (top.t === 'scenario' && ix.itemById[top.id]) body = <ScenarioView key={`${top.id}:${top.method || ''}`} view={view} ix={ix} id={top.id} method={top.method} />;
   else if (top.t === 'todo') body = <Todo view={view} ix={ix} />;
   else if (top.t === 'terms') body = <Terms view={view} />;
   else body = <Overview view={view} ix={ix} onExplain={onExplain} />;

@@ -2,6 +2,7 @@
 import { initParsers, grammarFor } from './parse/treesitter.js';
 import { parsePython, pythonSites } from './parse/python.js';
 import { parseJs, jsSites } from './parse/js.js';
+import { parsePrisma } from './parse/prisma.js';
 
 /**
  * @param {{path: string, text: string}[]} sources
@@ -17,7 +18,15 @@ export async function analyzeSources(sources) {
   const jsFacts = {};
   const itemsByFile = {};
 
+  const prisma = [];
   for (const { path: file, text } of sources) {
+    if (file.endsWith('.prisma')) {
+      code[file] = text;
+      const r = parsePrisma(file, text);
+      files[file] = { lang: 'prisma', lines: text.split('\n').length, doc: '', error: null };
+      items.push(...r.items); itemsByFile[file] = r.items; prisma.push(...r.entities);
+      continue;
+    }
     const grammar = grammarFor(file);
     if (!grammar) continue;
     code[file] = text;
@@ -37,7 +46,12 @@ export async function analyzeSources(sources) {
   }
 
   const kinds = new Map(items.map((i) => [i.id, i.kind]));
-  const raw = [...pythonSites(pyFacts, kinds), ...jsSites(jsFacts, itemsByFile, kinds)];
+  const js = jsSites(jsFacts, itemsByFile, kinds, prisma);
+  const py = pythonSites(pyFacts, kinds);
+  // классы-наследники моделей из других файлов (class UserOut(UserBase)) — тоже сущности
+  for (const id of py.promote || []) { const it = items.find((i) => i.id === id); if (it) it.kind = 'entity'; kinds.set(id, 'entity'); }
+  const pySites = Array.isArray(py) ? py : py.sites;
+  const raw = [...pySites, ...js.sites];
   // одно место — одна запись (вызов в аргументах другого вызова не дублируем)
   const seen = new Set();
   const sites = raw.filter((s) => { const k = `${s.src}\u0000${s.tgt}\u0000${s.line}\u0000${s.kind}`; if (seen.has(k)) return false; seen.add(k); return true; })
@@ -48,7 +62,25 @@ export async function analyzeSources(sources) {
     if (!pair.has(k) || s.kind === 'call') pair.set(k, s.kind);
   }
   const edges = [...pair].map(([k, kind]) => [...k.split('\u0000'), kind]);
-  return { files, items, edges, sites, code };
+  // сущности, путь запроса, роли и «что внутри функций»
+  const entities = [...js.entities, ...prisma, ...(py.entities || [])].map(({ needsInit, schemaVar, ...e }) => e); // eslint-disable-line no-unused-vars
+  const web = { routes: [...js.web.routes, ...(py.web?.routes || [])] };
+  const roles = { ...(py.web?.roles || {}), ...js.web.roles };
+  const flows = {};
+  for (const f of [...Object.values(jsFacts), ...Object.values(pyFacts)]) Object.assign(flows, f.flows || {});
+  // что отвечает обработчик: res.json / return / throw / next(err) — из «что внутри»
+  for (const r of web.routes) {
+    const h = r.chain.find((s) => s.role === 'handler')?.id || r.id;
+    const f = flows[h];
+    r.handlerFile = h.split('::')[0];
+    r.out = (f?.outputs || []).filter((o) => ['response', 'return', 'throw', 'next'].includes(o.kind)).slice(0, 12);
+    // обработчик ошибок: какими кодами он отвечает
+    for (const e of r.errors) {
+      const eo = e.id && flows[e.id]?.outputs?.filter((o) => o.kind === 'response' || o.kind === 'return');
+      if (eo?.length && !e.about) e.about = `отвечает: ${[...new Set(eo.map((o) => o.status).filter(Boolean))].join(', ') || eo.map((o) => o.text).join('; ')}`;
+    }
+  }
+  return { files, items, edges, sites, code, entities, web, roles, flows };
 }
 
 /**

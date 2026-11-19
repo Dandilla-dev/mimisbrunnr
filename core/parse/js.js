@@ -3,10 +3,12 @@
 // методы в объектах (createSlice, module.exports), маршруты Express.
 import path from 'node:path';
 import { parse, field, walk, codeHash, headText, collapse } from './treesitter.js';
+import { decoratorsOf, entityFromDefine, entityFromMongoose, entityFromClass, jsExtras } from './js_extras.js';
+import { jsWeb, ORM_INSTANCE } from './js_web.js';
 
 const FUNC = new Set(['arrow_function', 'function_expression', 'function', 'generator_function']);
 const JSX = new Set(['jsx_element', 'jsx_self_closing_element', 'jsx_fragment']);
-const HTTP = new Set(['get', 'post', 'put', 'patch', 'delete', 'all', 'use', 'options', 'head']);
+const HTTP = new Set(['get', 'post', 'put', 'patch', 'delete', 'all', 'options', 'head']);
 const WRAPPERS = new Set(['memo', 'forwardRef', 'useCallback', 'useMemo', 'React.memo', 'React.forwardRef', 'observer', 'withRouter', 'connect']);
 
 function hasJsx(node) {
@@ -53,6 +55,8 @@ export function parseJs(file, source, grammar) {
   const taken = new Set();
   const stem = path.basename(file).replace(/\.[^.]+$/, '');
 
+  const nodeItem = new Map(); // «начало:конец» узла → id (для привязки маршрутов, сущностей, потока данных)
+  const entities = []; // { id, orm, ...описание } — собирается, пока дерево живо
   function add({ name, kind, outer, fn, sigNode, body, doc, route = '', skipHash }) {
     let id = `${file}::${name}`;
     if (taken.has(id)) id = `${file}::${name}#${outer.startPosition.row + 1}`;
@@ -68,6 +72,8 @@ export function parseJs(file, source, grammar) {
       hash: codeHash(outer, skipHash),
     };
     items.push(item);
+    nodeItem.set(`${outer.startIndex}:${outer.endIndex}`, id);
+    if (fn) nodeItem.set(`${fn.startIndex}:${fn.endIndex}`, id);
     ranges.push({ id, start: outer.startIndex, end: outer.endIndex, short: name.split('.').pop(), fn: fn || null, body: body || null });
     return item;
   }
@@ -107,6 +113,18 @@ export function parseJs(file, source, grammar) {
       visit(field(val, 'body'), nm);
       return;
     }
+    if (val.type === 'call_expression' && !prefix) {
+      // сущности: sequelize.define('Book', {...}) и mongoose.model('User', userSchema)
+      const ent = entityFromDefine(val) || entityFromMongoose(val, mongooseSchemas);
+      if (ent) {
+        const it = add({ name: nm, kind: 'entity', outer, sigNode: outer, body: null });
+        entities.push({ id: it.id, ...ent });
+        return;
+      }
+    }
+    if (val.type === 'new_expression' && /(^|\.)Schema$/.test(field(val, 'constructor')?.text || '') && !prefix) {
+      mongooseSchemas[nameNode.text] = val; // new Schema({...}) — поля для mongoose.model(...)
+    }
     if (val.type === 'call_expression') {
       const callee = field(val, 'function')?.text || '';
       const fnArg = firstFunctionArg(val);
@@ -127,11 +145,14 @@ export function parseJs(file, source, grammar) {
     const cname = nameNode ? nameNode.text : stem;
     const nm = prefix ? `${prefix}.${cname}` : cname;
     const body = field(node, 'body');
-    add({
-      name: nm, kind: 'class', outer: node.parent?.type === 'export_statement' ? node.parent : node,
+    // TypeORM @Entity, Sequelize «extends Model», DTO с проверками class-validator
+    const ent = entityFromClass(node);
+    const cls = add({
+      name: nm, kind: ent ? 'entity' : 'class', outer: node.parent?.type === 'export_statement' ? node.parent : node,
       sigNode: node, body,
       skipHash: (n) => n.type === 'method_definition' || (n.type === 'field_definition' && FUNC.has(field(n, 'value')?.type)),
     });
+    if (ent) entities.push({ id: cls.id, ...ent });
     for (const m of body?.namedChildren || []) {
       if (m.type === 'method_definition') {
         const mn = `${nm}.${field(m, 'name').text}`;
@@ -149,18 +170,64 @@ export function parseJs(file, source, grammar) {
     }
   }
 
+  // Маршруты и промежуточные обработчики:
+  //   app.get('/x', auth, controller.getX)      — обработчики по имени
+  //   router.post('/x', (req, res) => {…})      — обработчик прямо в вызове
+  //   router.route('/x').get(a).post(b)          — цепочка
+  //   fastify.get('/x', { preHandler }, handler) / fastify.route({ method, url, handler })
+  //   app.use((req, res, next) => {…})           — безымянный middleware → своя «функция»
   function routeCall(call, prefix) {
     const fn = field(call, 'function');
     if (fn?.type !== 'member_expression') return false;
     const method = field(fn, 'property')?.text;
-    if (!HTTP.has(method)) return false;
+    const obj = field(fn, 'object');
     const args = field(call, 'arguments')?.namedChildren || [];
-    const p = strValue(args[0]);
-    const handler = args.find((a) => FUNC.has(a.type));
-    if (p === null || !handler) return false;
-    const nm = `${method.toUpperCase()} ${p}`;
-    add({ name: nm, kind: 'route', outer: call, fn: handler, body: field(handler, 'body'), route: `${field(fn, 'object').text}.${method}('${p}')`, sigNode: call });
-    visit(field(handler, 'body'), prefix);
+    const line = call.startPosition.row + 1;
+    if (method === 'use' || method === 'addHook' || method === 'register') {
+      let found = false;
+      args.forEach((a) => {
+        if (!FUNC.has(a.type)) return;
+        add({ name: `${obj.text.split('.').pop()}.${method}@${a.startPosition.row + 1}`, kind: 'function', outer: a, fn: a, body: field(a, 'body'), sigNode: a });
+        visit(field(a, 'body'), prefix);
+        found = true;
+      });
+      return found;
+    }
+    if (method === 'route' && args[0]?.type === 'object') {
+      // fastify.route({ method: 'GET', url: '/x', handler })
+      const prop = (k) => args[0].namedChildren.find((p) => p.type === 'pair' && field(p, 'key')?.text.replace(/['"]/g, '') === k);
+      const m = strValue(field(prop('method'), 'value')), u = strValue(field(prop('url'), 'value'));
+      const h = field(prop('handler'), 'value');
+      if (m === null || u === null) return false;
+      const inline = h && FUNC.has(h.type) ? h : null;
+      add({ name: `${m.toUpperCase()} ${u}`, kind: 'route', outer: call, fn: inline, body: inline && field(inline, 'body'), route: `${obj.text}.route('${u}')`, sigNode: call });
+      if (inline) visit(field(inline, 'body'), prefix);
+      return true;
+    }
+    // цепочка router.route('/x').get(a).post(b)
+    const segs = [];
+    let cur = call;
+    while (cur?.type === 'call_expression' && field(cur, 'function')?.type === 'member_expression') {
+      const f = field(cur, 'function');
+      segs.unshift({ method: field(f, 'property')?.text, args: field(cur, 'arguments')?.namedChildren || [], call: cur });
+      cur = field(f, 'object');
+    }
+    let base = null, path = null;
+    if (segs.length > 1 && segs[0].method === 'route' && cur) { base = cur; path = strValue(segs[0].args[0]); segs.shift(); }
+    else if (segs.length === 1) { base = obj; path = strValue(args[0]); segs[0].args = args.slice(1); }
+    if (path === null || !base || !segs.every((g) => HTTP.has(g.method))) return false;
+    if (!segs.some((g) => g.args.length)) return false;
+    for (const g of segs) {
+      const last = g.args[g.args.length - 1];
+      const inline = last && FUNC.has(last.type) ? last : null;
+      const outer = segs.length === 1 ? call : g.call;
+      add({ name: `${g.method.toUpperCase()} ${path}`, kind: 'route', outer, fn: inline, body: inline && field(inline, 'body'), route: `${base.text}.${g.method}('${path}')`, sigNode: outer });
+      g.args.forEach((a, i) => {
+        if (a !== inline && FUNC.has(a.type)) add({ name: `${g.method.toUpperCase()} ${path} · шаг ${i + 1}`, kind: 'function', outer: a, fn: a, body: field(a, 'body'), sigNode: a });
+      });
+      for (const a of g.args) if (FUNC.has(a.type)) visit(field(a, 'body'), prefix);
+    }
+    void line;
     return true;
   }
 
@@ -199,6 +266,7 @@ export function parseJs(file, source, grammar) {
       case 'expression_statement': {
         const e = node.namedChild(0);
         if (e?.type === 'call_expression' && routeCall(e, prefix)) return;
+        if (e?.type === 'await_expression' && e.namedChild(0)?.type === 'call_expression' && routeCall(e.namedChild(0), prefix)) return;
         if (e?.type === 'assignment_expression') {
           const left = field(e, 'left'), right = field(e, 'right');
           // exports.x = function / module.exports.x = () => {}
@@ -218,8 +286,10 @@ export function parseJs(file, source, grammar) {
     for (const ch of node.namedChildren) visit(ch, prefix);
   }
 
+  const mongooseSchemas = {};
   visit(root, null);
   const facts = collectFacts(root, ranges, stem);
+  Object.assign(facts, jsExtras(root, { file, source, items, ranges, nodeItem, entities, mongooseSchemas, decoratorsOf }));
   const doc = root.namedChild(0)?.type === 'comment' ? collapse(cleanComment(root.namedChild(0).text), 200) : '';
   tree.delete();
   return { items, doc, facts };
@@ -331,7 +401,7 @@ function collectFacts(root, ranges, stem) {
     if (n.type === 'member_expression') {
       const o = field(n, 'object'), p = field(n, 'property')?.text;
       if (o?.type === 'this') return { t: 'this', name: p };
-      return { t: 'member', obj: o?.type === 'identifier' ? o.text : null, objSpec: jsSpec(o), name: p };
+      return { t: 'member', obj: o?.type === 'identifier' ? o.text : null, objSpec: jsSpec(o), name: p, text: n.text.length < 80 ? n.text : '' };
     }
     return null;
   };
@@ -392,6 +462,11 @@ function collectFacts(root, ranges, stem) {
       case 'required_parameter': case 'optional_parameter': {
         const pat = field(n, 'pattern'), typ = field(n, 'type');
         if (pat?.type === 'identifier' && typ) bind(owner, pat.text, { k: 'ann', text: typ.text.replace(/^:\s*/, '') });
+        // constructor(private readonly booksService: BooksService) — поле класса (внедрение зависимостей)
+        if (pat?.type === 'identifier' && typ && owner && /\.constructor$/.test(owner) && n.namedChildren.some((c) => c.type === 'accessibility_modifier' || c.text === 'readonly')) {
+          const cls = owner.split('::')[1].split('.')[0];
+          (classAttrs[cls] ||= {})[pat.text] = { ann: typ.text.replace(/^:\s*/, '') };
+        }
         v(field(n, 'value'), ctx, owner);
         return;
       }
@@ -402,6 +477,7 @@ function collectFacts(root, ranges, stem) {
           const attrs = (classAttrs[cls] ||= {});
           attrs[field(l, 'property').text] ??= { spec: jsSpec(rt), owner };
         }
+        if (l?.type === 'identifier') bind(owner, l.text, jsSpec(rt)); // book = await repo.addBook(...) — тип для book.setAuthors()
         if (isRefNode(rt) && rt.type === 'identifier') add(rt, owner, ctx, 'ref', refOf(rt));
         else v(rt, ctx, owner);
         v(l, ctx, owner);
@@ -496,7 +572,7 @@ const EXTS = ['', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '/index.js', '/i
 /**
  * Места связей для всех JS-файлов: { src, tgt, line, kind: 'call'|'ref', ctx }.
  */
-export function jsSites(jsFiles, itemsByFile, kinds) {
+export function jsSites(jsFiles, itemsByFile, kinds, extraEntities = []) {
   const files = new Set(Object.keys(jsFiles));
   const resolveSource = (from, src) => {
     if (!src.startsWith('.')) return null;
@@ -514,7 +590,15 @@ export function jsSites(jsFiles, itemsByFile, kinds) {
     const ex = jsFiles[file]?.exportsMap || {};
     return name === 'default' ? ex.default : ex[name] || name;
   };
-  const exported = (file, name) => { const l = exportedLocal(file, name); return l ? byName[file]?.[l] || null : null; };
+  // экспорт с учётом реэкспорта: export { Book } from / import Book …; export { Book }
+  const exported = (file, name, depth = 0) => {
+    const l = exportedLocal(file, name);
+    if (!l) return null;
+    if (byName[file]?.[l]) return byName[file][l];
+    const imp = depth < 4 && jsFiles[file]?.imports[l];
+    if (imp) { const tf = resolveSource(file, imp.source); if (tf) return exported(tf, imp.name === '*' ? 'default' : imp.name, depth + 1); }
+    return null;
+  };
   const nameOf = (id) => id.split('::')[1].replace(/#\d+$/, '');
 
   // имя в функции owner файла file → id (сначала вложенные, потом файл, потом импорт)
@@ -533,7 +617,7 @@ export function jsSites(jsFiles, itemsByFile, kinds) {
     const [f, cls] = clsId.split('::');
     return byName[f]?.[`${cls}.${m}`] || null;
   };
-  const isClass = (id) => id && kinds.get(id) === 'class';
+  const isClass = (id) => id && (kinds.get(id) === 'class' || kinds.get(id) === 'entity');
   function annType(file, owner, text) {
     if (!text) return null;
     const words = (text.match(/[A-Za-z_$][\w$]*/g) || []).filter((w) => !['Promise', 'Array', 'Readonly', 'Partial', 'ReadonlyArray', 'undefined', 'null', 'typeof'].includes(w));
@@ -566,6 +650,11 @@ export function jsSites(jsFiles, itemsByFile, kinds) {
       case 'var': {
         const l = localSpec(file, owner, spec.name);
         if (l && l.spec !== spec) return typeOf(l.spec, file, l.owner || null, depth + 1);
+        if (!l) {
+          // имя самой сущности (Book.findByPk) — «статический» вызов модели
+          const id = resolveName(file, owner, spec.name);
+          if (id && kinds.get(id) === 'entity') return `static:${id}`;
+        }
         const imp = jsFiles[file].imports[spec.name];
         if (imp) {
           const tf = resolveSource(file, imp.source);
@@ -580,6 +669,8 @@ export function jsSites(jsFiles, itemsByFile, kinds) {
       case 'call': return retType(resolveName(file, owner, spec.name), depth);
       case 'mcall': {
         const t = typeOf(spec.obj, file, owner, depth + 1);
+        if (t?.startsWith('static:')) return ORM_INSTANCE.has(spec.attr) ? t.slice(7) : null; // Book.create() → объект Book
+        if (t && kinds.get(t) === 'entity' && /^(get|create)[A-Z]/.test(spec.attr || '')) return entityOfAssoc(t, spec.attr);
         if (t) return retType(classMethod(t, spec.attr), depth);
         if (spec.obj?.k === 'var') {
           const imp = jsFiles[file].imports[spec.obj.name];
@@ -590,7 +681,7 @@ export function jsSites(jsFiles, itemsByFile, kinds) {
       }
       case 'attr': {
         const t = typeOf(spec.obj, file, owner, depth + 1);
-        if (!t) return null;
+        if (!t || t.startsWith('static:')) return null;
         const [cf, cls] = t.split('::');
         const x = jsFiles[cf]?.classAttrs[cls]?.[spec.attr];
         if (x?.ann) return annType(cf, null, x.ann);
@@ -601,12 +692,50 @@ export function jsSites(jsFiles, itemsByFile, kinds) {
     }
   }
 
+  // ---- сущности: связи (Sequelize associations, TypeORM-декораторы, ref в Mongoose) ----
+  const entities = [];
+  const entByModel = {};
+  for (const [file, facts] of Object.entries(jsFiles)) for (const e of facts.entities || []) { entities.push({ ...e, file }); entByModel[e.model] ??= e.id; }
+  const entById = Object.fromEntries(entities.map((e) => [e.id, e]));
+  // Prisma: prisma.user.findMany() → сущность User
+  const prismaByLower = Object.fromEntries(extraEntities.map((e) => [e.model[0].toLowerCase() + e.model.slice(1), e.id]));
+  const sing = (w) => w.replace(/ies$/, 'y').replace(/s$/, '');
+  const cap = (w) => (w ? w[0].toUpperCase() + w.slice(1) : w);
+  for (const [file, facts] of Object.entries(jsFiles)) {
+    for (const a of facts.assoc || []) {
+      const from = resolveName(file, null, a.from), to = resolveName(file, null, a.to);
+      if (!entById[from] || !entById[to]) continue;
+      const through = a.through && (resolveName(file, null, a.through) || entities.find((e) => e.table === a.through || e.model === a.through)?.id || a.through);
+      const as = a.as || (a.kind === 'hasMany' || a.kind === 'belongsToMany' ? `${entById[to].model.toLowerCase()}s` : entById[to].model.toLowerCase());
+      const many = a.kind === 'hasMany' || a.kind === 'belongsToMany';
+      const methods = many
+        ? ['get', 'set', 'add', 'remove', 'has', 'count'].map((m) => `${m}${cap(as)}`).concat(['add', 'remove', 'has', 'create'].map((m) => `${m}${cap(sing(as))}`))
+        : ['get', 'set', 'create'].map((m) => `${m}${cap(as)}`);
+      entById[from].relations.push({ kind: a.kind, to, as, fk: a.fk, otherKey: a.otherKey, through, file, line: a.line, methods: [...new Set(methods)] });
+    }
+  }
+  for (const e of entities) {
+    for (const r of e.relations) if (r.to && !entById[r.to]) { const id = resolveName(e.file, null, r.to) || entByModel[r.to]; if (id) r.to = id; }
+    for (const f of e.fields) {
+      if (e.orm === 'mongoose' && f.ref?.model && entByModel[f.ref.model] && !e.relations.some((r) => r.as === f.name)) {
+        e.relations.push({ kind: f.type.endsWith('[]') ? 'hasMany' : 'belongsTo', to: entByModel[f.ref.model], as: f.name, fk: f.name, file: e.file, line: e.line || 0, methods: [] });
+      }
+      if (f.ref?.model) f.ref.id = resolveName(e.file, null, f.ref.model) || entByModel[f.ref.model] || null;
+    }
+  }
+  // book.setAuthors(...) / author.getBooks() — методы, которые добавила связь
+  function assocOf(entId, method) {
+    for (const r of entById[entId]?.relations || []) if (r.methods?.includes(method)) return r;
+    return null;
+  }
+  function entityOfAssoc(entId, method) { return assocOf(entId, method)?.to || null; }
+
   const out = [];
   for (const [file, facts] of Object.entries(jsFiles)) {
     const names = byName[file] || {};
     for (const s of facts.sites) {
       const r = s.target;
-      let tgt = null;
+      let tgt = null, label = '';
       if (r.t === 'name') tgt = resolveName(file, s.from, r.name);
       else if (r.t === 'this') {
         const cls = nameOf(s.from).split('.')[0];
@@ -617,12 +746,23 @@ export function jsSites(jsFiles, itemsByFile, kinds) {
           const tf = resolveSource(file, imp.source);
           if (tf) tgt = exported(tf, r.name) || byName[tf]?.[`${exported(tf, 'default')?.split('::')[1]}.${r.name}`] || null;
         } else if (r.obj && names[`${r.obj}.${r.name}`]) tgt = names[`${r.obj}.${r.name}`]; // объект в том же файле
-        if (!tgt) tgt = classMethod(typeOf(r.objSpec, file, s.from), r.name);
+        if (!tgt) {
+          const t = typeOf(r.objSpec, file, s.from);
+          if (s.kind === 'ref' && t && (t.startsWith('static:') || kinds.get(t) === 'entity')) { /* book.publisher — чтение поля, не передача функции */ }
+          else if (t?.startsWith('static:')) { tgt = t.slice(7); label = r.text || `${r.obj || '…'}.${r.name}`; } // Book.findByPk(...)
+          else if (!t && r.objSpec?.k === 'attr' && prismaByLower[r.objSpec.attr]) { tgt = prismaByLower[r.objSpec.attr]; label = `${r.objSpec.obj?.name || 'prisma'}.${r.objSpec.attr}.${r.name}`; }
+          else if (t && kinds.get(t) === 'entity') {
+            const rel = assocOf(t, r.name);
+            tgt = rel?.to || t; label = r.text || `${r.obj || '…'}.${r.name}`; // book.setAuthors(...) — через связь
+          } else tgt = classMethod(t, r.name);
+        }
       }
       if (!tgt || tgt === s.from || !kinds.has(tgt)) continue;
       if (s.kind === 'ref' && kinds.get(tgt) === 'class') continue;
-      out.push({ src: s.from, tgt, line: s.line, kind: s.kind, ctx: s.ctx });
+      out.push({ src: s.from, tgt, line: s.line, kind: s.kind, ctx: s.ctx, label });
     }
   }
-  return out;
+  const resolver = { resolveName, resolveSource, exported, exportedLocal, classMethod, byName, kinds, annType };
+  const web = jsWeb(jsFiles, resolver, out);
+  return { sites: out, entities, web };
 }

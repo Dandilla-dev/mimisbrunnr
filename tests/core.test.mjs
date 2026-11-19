@@ -56,11 +56,14 @@ const llm = http.createServer((req, res) => {
       answer = { file_purposes: Object.fromEntries(bare.map((f) => [f, 'Назначение из обзора.'])), summary: 'Тестовый обзор.', layers: [{ name: 'Первая половина', description: 'Тест', files: files.slice(0, Math.ceil(files.length / 2)) }, { name: 'Вторая половина', description: 'Тест', files: files.slice(Math.ceil(files.length / 2)) }] };
     } else if (user.includes('одним словом')) {
       answer = null;
+    } else if (user.includes('по шагам — так, чтобы ученик понял')) {
+      const ls = [...user.matchAll(/^\s*(\d+)\| /gm)].map((m) => Number(m[1]));
+      answer = { steps: [{ from: ls[0], to: ls[1] || ls[0], title: 'Начало', text: 'Шаг один.' }, { from: (ls[1] || ls[0]) + 1, to: ls[ls.length - 1], title: 'Конец', text: 'Шаг два.' }] };
     } else if (user.includes('Разбираем сценарий')) {
       const ns = [...user.matchAll(/^\s*(\d+)\. /gm)].map((m) => Number(m[1]));
       answer = { title: 'Тестовый сценарий', summary: 'Сводка сценария.', steps: ns.map((n) => ({ n, text: `Шаг ${n}.` })) };
     } else {
-      const names = [...user.matchAll(/^- (.+?) \((?:функция|метод|класс|React-компонент|React-хук|маршрут),/gm)].map((m) => m[1]);
+      const names = [...user.matchAll(/^- (.+?) \((?:функция|метод|класс|React-компонент|React-хук|маршрут|сущность),/gm)].map((m) => m[1]);
       answer = {
         file_purpose: 'Тестовое назначение файла.',
         items: names.map((n) => ({ name: n, phrase: `Фраза про ${n}`, what: `Что делает ${n}.`, io: 'Вход/выход.', example: 'Пример.', watch: 'Внимание.' })),
@@ -204,8 +207,16 @@ try {
   const groups = entryPoints(v);
   assert.ok(groups.find((g) => g.title === 'Маршруты API').ids.includes('app/api/routes.py::create_order'));
   const sc = buildScenario(v, 'app/api/routes.py::create_order', { depth: 4 });
-  const order = sc.steps.map((x) => x.id.split('::')[1]);
-  assert.deepEqual(order.slice(0, 4), ['create_order', 'get_db', 'Database.connect', 'OrderService']);
+  assert.equal(sc.steps[0].role, 'request');
+  assert.equal(sc.steps[0].label, 'POST /api/orders'); // include_router(router, prefix="/api")
+  const roles = sc.steps.filter((x) => x.depth === 1).map((x) => x.role);
+  assert.deepEqual(roles.slice(0, 6), ['middleware', 'middleware', 'router', 'validate', 'dependency', 'controller']); // CORS, timing, роутер, OrderIn, get_db, обработчик
+  const order = sc.steps.filter((x) => x.id).map((x) => x.id.split('::')[1]);
+  // Depends(get_db) выполняется до обработчика; дальше — шаги обработчика по порядку строк
+  assert.ok(order.indexOf('get_db') < order.indexOf('create_order'));
+  assert.ok(order.indexOf('OrderService.create') < order.indexOf('Database.insert'));
+  assert.ok(sc.steps.some((x) => x.role === 'error' && x.id === 'app/main.py::value_error')); // @app.exception_handler
+  assert.ok(sc.steps.find((x) => x.id === 'app/api/routes.py::create_order').role === 'controller');
   assert.ok(order.indexOf('OrderService.create') < order.indexOf('Database.insert'));
   assert.equal(sc.steps.find((x) => x.id === 'app/db.py::Database.insert').ctx, 'with self.repo.transaction():');
   step(`сценарий: ${sc.steps.length} шагов от create_order, порядок как в коде`);
@@ -218,7 +229,86 @@ try {
   assert.equal(story.hash, sc.hash);
   step(`рассказ сценария от ИИ: ${Object.keys(story.texts).length} шагов, $${sr.result.cost.toFixed(4)}`);
 
-  // 7. обновление: изменённая, новая и удалённая функции
+  // 7. разбор по шагам от ИИ и «что внутри» (поток данных)
+  const fl = await core.flow(back.id, 'app/services/orders.py::OrderService.create');
+  assert.deepEqual(fl.params.map((p) => p.name), ['customer', 'lines', 'code']);
+  assert.ok(fl.vars.find((x) => x.name === 'amount' && /apply_discount/.test(x.from)));
+  assert.ok(fl.outputs.some((o) => o.kind === 'return'));
+  const we = await core.estimateWalk(back.id, 'app/services/orders.py::OrderService.create');
+  assert.ok(we.estCost > 0);
+  const wr = await core.runWalk(back.id, 'app/services/orders.py::OrderService.create');
+  assert.equal(wr.view.walks['app/services/orders.py::OrderService.create'].steps.length, 2);
+  step('«что внутри»: параметры, переменные, выход; разбор по шагам от ИИ');
+
+  // 8. сущности Python: SQLAlchemy, Pydantic, dataclass
+  const ents = Object.fromEntries(wr.view.entities.map((e) => [e.id.split('::')[1], e]));
+  assert.equal(ents.Customer.orm, 'sqlalchemy');
+  assert.equal(ents.Customer.table, 'customers');
+  assert.deepEqual(ents.Customer.relations.map((r) => [r.kind, r.to, r.as]), [['hasMany', 'app/tables.py::OrderRow', 'orders']]);
+  assert.equal(ents.OrderRow.fields.find((f) => f.name === 'customer_id').ref.id, 'app/tables.py::Customer');
+  assert.equal(ents.OrderIn.orm, 'pydantic');
+  assert.ok(ents.OrderIn.fields.find((f) => f.name === 'customer').validate.includes('min_length=1'));
+  assert.equal(ents.Order.orm, 'dataclass');
+  step('сущности Python: SQLAlchemy (таблица, связи, внешний ключ), Pydantic, dataclass');
+
+  // 9. веб-приложения на JS: Express + Sequelize, NestJS + TypeORM, Fastify + Prisma; Flask
+  const web = async (name) => core.createSession(path.join(FIX, name));
+  const ex = await web('web_express');
+  const rt = (sess, m, p) => sess.web.routes.find((r) => r.method === m && r.path === p);
+  const post = rt(ex, 'POST', '/api/books');
+  assert.deepEqual(post.chain.map((x) => x.role), ['middleware', 'middleware', 'auth', 'router', 'validate', 'handler']);
+  assert.equal(post.chain[0].label, 'express.json()');
+  assert.ok(post.errors.some((x) => x.id === 'src/middlewares/error.middleware.js::errorHandler'));
+  assert.ok(rt(ex, 'DELETE', '/api/readers/:id')); // router.route('/readers/:id').get().delete()
+  const exE = Object.fromEntries(ex.entities.map((e) => [e.id.split('::')[1], e]));
+  assert.equal(exE.Book.table, 'books');
+  assert.ok(exE.Book.fields.find((f) => f.name === 'isbn').pk);
+  const rel = exE.Book.relations[0];
+  assert.deepEqual([rel.kind, rel.to, rel.through], ['belongsToMany', 'src/models/reader.model.js::Reader', 'loans']);
+  assert.ok(rel.methods.includes('setReaders'));
+  assert.ok(ex.sites.some(([a, b, , , , label]) => a === 'src/services/library.service.js::addBook' && b === 'src/models/reader.model.js::Reader' && label === 'book.setReaders'));
+  assert.ok(ex.sites.some(([a, b, , , , label]) => a === 'src/repositories/book.repository.js::findBook' && b === 'src/models/book.model.js::Book' && label === 'Book.findByPk'));
+  const exF = await core.flow(ex.id, 'src/services/library.service.js::addBook');
+  assert.ok(exF.vars.find((x) => x.name === 't' && /sequelize\.transaction/.test(x.from)));
+  assert.ok(exF.outputs.some((o) => o.kind === 'throw' && /already exists/.test(o.text)));
+  assert.ok(exF.effects.some((e) => e.text === 't.commit'));
+  const ctlF = await core.flow(ex.id, 'src/controllers/library.controller.js::getBook');
+  assert.ok(ctlF.inputs.some((x) => x.text === 'req.params'));
+  assert.ok(ctlF.outputs.some((o) => o.kind === 'response') && ctlF.outputs.some((o) => o.kind === 'next'));
+  const exSc = buildScenario(ex, post.id, { depth: 5 });
+  assert.equal(exSc.steps[0].label, 'POST /api/books');
+  assert.ok(exSc.steps.some((x) => x.role === 'response' && /201/.test(x.about)));
+  step(`Express: путь POST /api/books (${post.chain.length} шагов до обработчика), Sequelize-сущности и связи, поток данных`);
+
+  const ne = await web('web_nest');
+  const nr = rt(ne, 'GET', '/api/books/:id');
+  assert.deepEqual(nr.chain.map((x) => x.role), ['auth', 'middleware', 'validate', 'validate', 'handler']);
+  assert.equal(nr.chain[0].id, 'src/common/api-key.guard.ts::ApiKeyGuard.canActivate');
+  assert.ok(hasEdge(ne, 'src/books/books.controller.ts::BooksController.findOne', 'src/books/books.service.ts::BooksService.findOne')); // constructor(private booksService)
+  const neE = Object.fromEntries(ne.entities.map((e) => [e.id.split('::')[1], e]));
+  assert.equal(neE.Book.orm, 'typeorm');
+  assert.deepEqual(neE.Book.relations.map((r) => [r.kind, r.to]), [['belongsTo', 'src/books/author.entity.ts::Author']]);
+  assert.equal(neE.CreateBookDto.orm, 'dto');
+  assert.ok(ne.sites.some(([a, b]) => a === 'src/books/books.service.ts::BooksService.findOne' && b === 'src/books/book.entity.ts::Book'));
+  step('NestJS: guard → interceptor → pipe → DTO → контроллер → сервис → TypeORM');
+
+  const fa = await web('web_fastify');
+  const fr = rt(fa, 'POST', '/v1/notes');
+  assert.deepEqual(fr.chain.map((x) => x.role), ['auth', 'router', 'middleware', 'validate', 'handler']); // verifyUser из auth.js
+  const faE = Object.fromEntries(fa.entities.map((e) => [e.id.split('::')[1], e]));
+  assert.equal(faE.Note.orm, 'prisma');
+  assert.equal(faE.Note.table, 'notes');
+  assert.deepEqual(faE.User.relations.map((r) => r.kind), ['hasMany']);
+  assert.ok(fa.sites.some(([a, b, , , , label]) => b === 'prisma/schema.prisma::Note' && label === 'prisma.note.create'));
+  step('Fastify + Prisma: хук onRequest, плагин с префиксом, preHandler, схема; модели из schema.prisma');
+
+  const fl2 = await web('web_flask');
+  const flr = rt(fl2, 'GET', '/shop/items');
+  assert.deepEqual(flr.chain.map((x) => x.role), ['router', 'middleware', 'auth', 'handler']);
+  assert.ok(flr.errors.some((x) => x.label === '404'));
+  step('Flask: blueprint с префиксом, before_request, login_required, errorhandler');
+
+  // 10. обновление: изменённая, новая и удалённая функции
   const copy = path.join(tmp, 'py-copy');
   fs.cpSync(PY, copy, { recursive: true });
   const s2 = await core.createSession(copy);
@@ -237,16 +327,16 @@ try {
   assert.ok(v.orphans.includes('app/rules.py::_rule_night_time'));
   step(`обновление: изменено ${v.lastUpdate.changed}, новых ${v.lastUpdate.added}, удалено ${v.lastUpdate.removed}; устаревшие и новые помечены`);
 
-  // 8. сессии переживают перезапуск
+  // 11. сессии переживают перезапуск
   const core2 = new MimisCore(path.join(tmp, 'data'));
   const list = await core2.listSessions();
-  assert.equal(list.length, 3);
+  assert.equal(list.length, 7);
   const again = await core2.view(front.id);
   assert.equal(again.counts.fresh, again.counts.total);
   step(`перезапуск: ${list.length} сессии прочитаны с диска, пояснения на месте`);
 
   core2.deleteSession(s2.id);
-  assert.equal((await core2.listSessions()).length, 2);
+  assert.equal((await core2.listSessions()).length, 6);
   step('удаление сессии');
   console.log(`Все проверки пройдены (${ok}). Запросов к модели: ${calls}.`);
 } finally {

@@ -1,5 +1,6 @@
 // Разбор Python: функции, классы, методы; импорты и вызовы для графа.
 import { parse, field, walk, codeHash, headText, collapse } from './treesitter.js';
+import { pyEntity, pyFlow, pyWebFacts } from './py_extras.js';
 
 const ROUTE_RE = /^@?(router|app|bp|blueprint|api)\.(get|post|put|patch|delete|route|websocket|api_route)\b/;
 
@@ -25,6 +26,8 @@ export function parsePython(file, source) {
   const tree = parse('python', source);
   const root = tree.rootNode;
   const items = [];
+  const entities = [];
+  const flows = {};
   function add(def, decs, outer, cls) {
     const isClass = def.type === 'class_definition';
     const nameNode = field(def, 'name');
@@ -32,9 +35,13 @@ export function parsePython(file, source) {
     const name = cls ? `${cls}.${nameNode.text}` : nameNode.text;
     const body = field(def, 'body');
     const id = `${file}::${name}`;
+    // сущность: SQLAlchemy / SQLModel / Pydantic / dataclass / Django
+    const ent = isClass && !cls ? pyEntity(def, decs) : null;
+    if (ent) entities.push({ id, ...ent });
+    if (!isClass) flows[id] = pyFlow(def);
     items.push({
       id, file, name,
-      kind: isClass ? 'class' : cls ? 'method' : 'function',
+      kind: isClass ? (ent?.orm ? 'entity' : 'class') : cls ? 'method' : 'function',
       line: outer.startPosition.row + 1,
       end: outer.endPosition.row + 1,
       sig: headText(def, body, source),
@@ -59,6 +66,9 @@ export function parsePython(file, source) {
 
   const fileDoc = docstring(root);
   const facts = collectFacts(root);
+  facts.entities = entities; // в т. ч. классы без orm — их «наследники» Pydantic найдутся при сборке
+  facts.flows = flows;
+  facts.web = pyWebFacts(root);
   tree.delete();
   return { items, doc: fileDoc, facts };
 }
@@ -477,7 +487,148 @@ export function pythonSites(pyFiles, kinds) {
       }
     }
   }
-  return out;
+  // ---- сущности: наследники Pydantic/SQLModel из других файлов и связи ----
+  const entAll = {};
+  for (const [file, facts] of Object.entries(pyFiles)) for (const e of facts.entities || []) entAll[e.id] = { ...e, file };
+  const promote = [];
+  for (let pass = 0; pass < 3; pass++) {
+    for (const e of Object.values(entAll)) {
+      if (e.orm) continue;
+      const fc = fileCtx(e.file);
+      const base = (e.bases || []).map((b) => fc.resolveName(b.split('.').pop()) || (classFile[b] ? `${classFile[b]}::${b}` : null)).map((id) => entAll[id]).find((x) => x?.orm);
+      if (base) { e.orm = base.orm === 'sqlalchemy' ? 'sqlalchemy' : base.orm; promote.push(e.id); }
+    }
+  }
+  const entities = Object.values(entAll).filter((e) => e.orm).map(({ bases, ...e }) => e); // eslint-disable-line no-unused-vars
+  const byModel = Object.fromEntries(entities.map((e) => [e.model, e.id]));
+  const byTable = Object.fromEntries(entities.filter((e) => e.table).map((e) => [e.table, e.id]));
+  for (const e of entities) {
+    for (const r of e.relations) {
+      const nm = String(r.to || '').split('.').pop().replace(/["']/g, '');
+      r.toName = nm; r.to = byModel[nm] || fileCtx(e.file).resolveName(nm) || nm;
+      if (r.through) r.throughId = byTable[r.through] || byModel[r.through] || null;
+    }
+    for (const f of e.fields) if (f.ref?.table) { const t = f.ref.table.split('.')[0]; f.ref.id = byTable[t] || null; f.ref.model = byTable[t]?.split('::')[1] || t; }
+  }
+
+  // ---- путь запроса: FastAPI и Flask ----
+  const AUTH = /auth|jwt|token|login|current_?user|permission|role|admin|verify|session/i;
+  const containers = {}; // «файл:имя» → { fw, kind, prefix, deps, routes, mws, errors, ext, includes }
+  const ck = (file, name) => `${file}:${name}`;
+  const varOf = (file, name) => {
+    if (!name) return null;
+    if (pyFiles[file]?.web?.vars?.[name]) return ck(file, name);
+    const fc = fileCtx(file);
+    const t = fc.importTarget(name);
+    if (t && pyFiles[t.file]?.web?.vars?.[t.name]) return ck(t.file, t.name);
+    if (name.includes('.')) { const [mod, v] = name.split('.'); const mf = fc.moduleOf(mod); if (mf && pyFiles[mf]?.web?.vars?.[v]) return ck(mf, v); }
+    return null;
+  };
+  for (const [file, facts] of Object.entries(pyFiles)) {
+    for (const [name, v] of Object.entries(facts.web?.vars || {})) containers[ck(file, name)] = { file, name, ...v, routes: [], mws: [], errors: [], ext: [], includes: [] };
+  }
+  for (const [file, facts] of Object.entries(pyFiles)) {
+    const fc = fileCtx(file);
+    for (const d of facts.web?.decorated || []) {
+      const id0 = `${file}::${d.fn}`;
+      // вложенные (в create_app) — без своей «функции», но обработчик ошибок и before_request всё равно покажем
+      const id = d.top && kinds.has(id0) ? id0 : null;
+      if (!id && !d.decs.some((x) => /errorhandler|exception_handler|before_request|middleware/.test(x.method || ''))) continue;
+      const plain = d.decs.filter((x) => x.plain || !varOf(file, x.obj));
+      for (const dec of d.decs) {
+        const c = containers[varOf(file, dec.obj)];
+        if (!c) continue;
+        if (HTTPM_PY.has(dec.method) && dec.path !== null) {
+          const methods = dec.method === 'route' || dec.method === 'api_route' ? (dec.methods.length ? dec.methods : ['GET']) : [dec.method === 'websocket' ? 'WS' : dec.method.toUpperCase()];
+          c.routes.push({ id, methods, path: dec.path, deps: dec.deps, responseModel: dec.responseModel, status: dec.status, params: d.params, plain, line: d.line, file });
+        } else if (dec.method === 'middleware') c.mws.push({ role: 'middleware', id, label: '', about: 'промежуточный обработчик: видит каждый запрос до обработчика и ответ после', file, line: d.line });
+        else if (dec.method === 'before_request' || dec.method === 'before_app_request') c.mws.push({ role: AUTH.test(d.fn) ? 'auth' : 'middleware', id, label: '', about: 'выполняется перед каждым запросом', file, line: d.line });
+        else if (dec.method === 'exception_handler' || dec.method === 'errorhandler' || dec.method === 'app_errorhandler') c.errors.push({ role: 'error', id, label: `${dec.first || ''}`, about: `обрабатывает ${dec.first || 'ошибку'}`, file, line: d.line });
+      }
+    }
+    for (const call of facts.web?.calls || []) {
+      const c = containers[varOf(file, call.obj)];
+      if (!c) continue;
+      if (call.method === 'add_middleware') c.ext.push({ role: AUTH.test(call.target) ? 'auth' : 'middleware', id: null, label: call.target, about: KNOWN_PY[call.target] || 'подключённый middleware', file, line: call.line });
+      else c.includes.push({ target: varOf(file, call.target), prefix: call.prefix, deps: call.deps, line: call.line, file, text: call.target });
+    }
+    void fc;
+  }
+  const join = (...ps) => (`/${ps.filter(Boolean).join('/')}`).replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1');
+  const routes = [];
+  const roles = {};
+  const depStep = (file, name, where) => {
+    const id = fileCtx(file).resolveName(name.split('.').pop()) || null;
+    const role = AUTH.test(name) ? 'auth' : 'dependency';
+    if (id) roles[id] ??= role;
+    return { role, id: kinds.has(id) ? id : null, label: `Depends(${name})`, about: where, file, line: 0 };
+  };
+  const seenC = new Set();
+  function walkC(key, prefix, before, deps, errors, depth = 0) {
+    const c = containers[key];
+    if (!c || depth > 6) return;
+    seenC.add(key);
+    const pre = join(prefix, c.kind === 'router' ? c.prefix : '');
+    const mws = [...before, ...c.ext, ...c.mws];
+    const allDeps = [...deps, ...(c.deps || []).map((n) => depStep(c.file, n, 'зависимость всего роутера'))];
+    const errs = [...c.errors, ...errors];
+    for (const r of c.routes) {
+      const chain = mws.map((x) => ({ ...x }));
+      for (const n of r.deps) chain.push(depStep(r.file, n, 'зависимость маршрута'));
+      chain.push(...allDeps.map((x) => ({ ...x })));
+      for (const p of r.plain) {
+        const id = fileCtx(r.file).resolveName((p.method || '').split('.').pop());
+        const role = AUTH.test(p.text) ? 'auth' : /valid|schema/i.test(p.text) ? 'validate' : 'middleware';
+        chain.push({ role, id: kinds.has(id) ? id : null, label: p.text.replace(/^@/, ''), about: 'декоратор обработчика', file: r.file, line: r.line });
+        if (id) roles[id] ??= role;
+      }
+      for (const p of r.params) {
+        if (p.dep) { chain.push(depStep(r.file, p.dep, `параметр ${p.name}`)); continue; }
+        const t = (p.type || '').replace(/["']/g, '').split(/[[\]|, ]/).map((w) => w.trim()).filter(Boolean);
+        const ent = t.map((w) => byModel[w]).find(Boolean);
+        if (ent && entAll[ent]?.orm === 'pydantic') chain.push({ role: 'validate', id: ent, label: `${p.name}: ${p.type}`, about: c.fw === 'fastapi' ? 'FastAPI проверяет тело запроса по этой схеме; при ошибке — ответ 422' : 'данные запроса по схеме', file: r.file, line: r.line });
+      }
+      chain.push({ role: 'handler', id: r.id, label: '', file: r.file, line: r.line });
+      roles[r.id] = 'controller';
+      const builtin = c.fw === 'fastapi'
+        ? { role: 'error', id: null, label: 'встроенная обработка FastAPI', about: 'HTTPException → ответ с её кодом; ошибка проверки данных → 422; прочие ошибки → 500' }
+        : { role: 'error', id: null, label: 'встроенная обработка Flask', about: 'abort(код) → ответ с этим кодом; прочие ошибки → 500' };
+      for (const m of r.methods) {
+        routes.push({ id: r.id, method: m, path: join(pre, r.path), fw: c.fw, file: r.file, line: r.line, chain, errors: [...errs, builtin], response: r.responseModel ? { model: byModel[r.responseModel] || null, text: r.responseModel, status: r.status } : null });
+      }
+    }
+    for (const inc of c.includes) {
+      if (!inc.target) continue;
+      const rs = { role: 'router', id: null, label: inc.text, about: `подключён${inc.prefix ? ` по адресу ${join(pre, inc.prefix)}` : ''}`, file: inc.file, line: inc.line };
+      walkC(inc.target, join(pre, inc.prefix), [...mws, rs], [...allDeps, ...inc.deps.map((n) => depStep(inc.file, n, 'зависимость подключения'))], errs, depth + 1);
+    }
+    for (const x of c.mws) if (x.id) roles[x.id] ??= x.role;
+    for (const x of c.errors) if (x.id) roles[x.id] = 'error';
+  }
+  for (const [key, c] of Object.entries(containers)) if (c.kind === 'app') walkC(key, '', [], [], []);
+  // роутеры, подключённые «непонятно как» (app.include_router(module.router) в цикле):
+  // если такое подключение в приложении одно — считаем, что они подключены к нему
+  const vague = Object.values(containers).filter((c) => c.kind === 'app' && c.includes.some((i) => !i.target));
+  for (const [key, c] of Object.entries(containers)) {
+    if (seenC.has(key) || !c.routes.length) continue;
+    const app = vague.length === 1 && vague[0].fw === c.fw ? vague[0] : null;
+    if (app) {
+      const inc = app.includes.find((i) => !i.target);
+      const rs = { role: 'router', id: null, label: `${c.name} · ${c.file}`, about: `подключён к приложению (${inc.text})`, file: inc.file, line: inc.line };
+      walkC(key, '', [...app.ext, ...app.mws, rs], [], app.errors);
+    } else walkC(key, '', [], [], []);
+  }
+  return { sites: out, entities, promote, web: { routes, roles } };
 }
+
+const HTTPM_PY = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'websocket', 'api_route', 'route']);
+const KNOWN_PY = {
+  CORSMiddleware: 'разрешает запросы с других сайтов (CORS)',
+  GZipMiddleware: 'сжимает ответ',
+  TrustedHostMiddleware: 'пускает запросы только к разрешённым адресам',
+  HTTPSRedirectMiddleware: 'перенаправляет на https',
+  SessionMiddleware: 'хранит сессию пользователя',
+};
+
 
 export { collapse };

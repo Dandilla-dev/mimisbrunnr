@@ -18,6 +18,7 @@ function analyzeOffThread(sources) {
 import { plan, runExplain } from './explain.js';
 import { callModel, PRESETS, costOf } from './llm.js';
 import { storyPlan, runStory } from './story.js';
+import { walkPlan, runWalk } from './walk.js';
 
 export class MimisCore {
   constructor(dataDir, { crypt = null, fetchFn = fetch, log = () => {} } = {}) {
@@ -133,6 +134,24 @@ export class MimisCore {
     this.jobs.set(id, { ctrl, state: { status: 'running', log: ['Рассказ сценария…'], done: 0, total: 1, spent: 0 } });
     try {
       const r = await runStory({ session: s, settings: this.settings, provider: this.settings.data.provider, apiKey: this.settings.apiKey(), fetchFn: this.fetchFn, signal: ctrl.signal }, entry, depth);
+      return { result: r, view: s.view() };
+    } finally { this.jobs.delete(id); }
+  }
+
+  // ---- «что внутри функции»: поток данных из разбора и разбор по шагам от ИИ ----
+  async flow(id, itemId) { return (await this.sessions.get(id)).flow(itemId); }
+  async estimateWalk(id, itemId) {
+    const s = await this.sessions.get(id);
+    const p = walkPlan(s.view(), (f) => s.code(f), (x) => s.flow(x), itemId, this.settings.data.provider);
+    return { estIn: p.estIn, estOut: p.estOut, estCost: p.estCost, priced: p.priced };
+  }
+  async runWalk(id, itemId) {
+    if (this.jobs.has(id)) throw new Error('Сейчас идёт объяснение — дождитесь окончания или остановите его.');
+    const s = await this.sessions.get(id);
+    const ctrl = new AbortController();
+    this.jobs.set(id, { ctrl, state: { status: 'running', log: ['Разбор по шагам…'], done: 0, total: 1, spent: 0 } });
+    try {
+      const r = await runWalk({ session: s, settings: this.settings, provider: this.settings.data.provider, apiKey: this.settings.apiKey(), fetchFn: this.fetchFn, signal: ctrl.signal }, itemId);
       return { result: r, view: s.view() };
     } finally { this.jobs.delete(id); }
   }

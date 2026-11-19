@@ -10,7 +10,7 @@ const short = (it) => it.name.split('.').pop();
 export function sitesIndex(view) {
   const bySrc = {};
   if (view.sites?.length) {
-    for (const [src, tgt, line, kind, ctx] of view.sites) (bySrc[src] ||= []).push({ tgt, line, kind, ctx });
+    for (const [src, tgt, line, kind, ctx, label] of view.sites) (bySrc[src] ||= []).push({ tgt, line, kind, ctx, label: label || '' });
     return { bySrc, ordered: true };
   }
   for (const [src, tgt, kind] of view.edges) (bySrc[src] ||= []).push({ tgt, line: 0, kind: kind || 'call', ctx: '' });
@@ -28,9 +28,11 @@ export function entryPoints(view) {
     ids.forEach((it) => taken.add(it.id));
     return { title, hint, ids: ids.map((it) => it.id) };
   };
-  const items = view.items.filter((it) => it.kind !== 'class');
+  const items = view.items.filter((it) => it.kind !== 'class' && it.kind !== 'entity');
+  const routeIds = new Set((view.web?.routes || []).map((r) => r.id));
   const groups = [
-    group('Маршруты API', 'Сюда приходят запросы извне: адрес и метод HTTP.', items.filter((it) => it.kind === 'route' || it.route)),
+    group('Маршруты API', 'Сюда приходят запросы извне: адрес и метод HTTP. Сценарий пройдёт весь путь запроса: промежуточные обработчики, проверки, обработчик, база, ответ и ошибки.',
+      items.filter((it) => routeIds.has(it.id) || it.kind === 'route' || it.route)),
     group('Действия в интерфейсе', 'Обработчики: что происходит, когда пользователь нажимает, вводит, отправляет.',
       items.filter((it) => !isTest(it) && it.name.includes('.') && /^(handle|on)[A-Z]/.test(short(it)))),
     group('Экраны и запуск', 'С чего начинается программа: main, корневые компоненты, которые никто не рисует.',
@@ -51,13 +53,42 @@ function hashStr(s) {
   return h.toString(16);
 }
 
+export const ROLE_RU = {
+  request: 'запрос', router: 'роутер', middleware: 'промежуточный обработчик', auth: 'проверка доступа', validate: 'проверка данных',
+  dependency: 'зависимость', controller: 'обработчик', handler: 'обработчик', service: 'сервис', repository: 'репозиторий',
+  entity: 'база данных', data: 'данные', schema: 'схема данных', response: 'ответ', 'error-branch': 'ошибки', error: 'обработчик ошибок', route: 'маршрут',
+};
+
+// Роль шага по месту в проекте — когда разбор не знает её точно
+export function roleOf(view, id) {
+  const it = view.items.find((i) => i.id === id);
+  if (!it) return '';
+  if (view.roles?.[id]) return view.roles[id];
+  if (it.kind === 'entity') {
+    const orm = (view.entities || []).find((e) => e.id === id)?.orm;
+    return orm === 'dataclass' ? 'data' : orm === 'pydantic' || orm === 'dto' ? 'schema' : 'entity';
+  }
+  const p = `${it.file} ${it.name}`;
+  if (/(^|\/)controllers?\/|Controller\b|_controller\b|\.controller\./i.test(p)) return 'controller';
+  if (/(^|\/)services?\/|Service\b|_service\b|\.service\./i.test(p)) return 'service';
+  if (/(^|\/)(repositor(y|ies)|dao|stores?)\/|Repository\b|Store\b|_store\b|\.repository\./i.test(p)) return 'repository';
+  if (/(^|\/)middlewares?\//i.test(p)) return 'middleware';
+  if (/(^|\/)(validators?|schemas?)\//i.test(p)) return 'validate';
+  return '';
+}
+
+/** Маршрут веб-приложения по id обработчика или маршрута. */
+export const routeOf = (view, id, method) => (view.web?.routes || []).find((r) => r.id === id && (!method || r.method === method)) || null;
+
 /**
  * Шаги сценария: обход в глубину, дети — в порядке строк.
- * Шаг: { n, id, depth, parent, line, kind, ctx, repeat, cut }.
+ * Шаг: { n, id, depth, parent, line, kind, ctx, repeat, cut, role, label, about, synthetic, file }.
  *  repeat — эта функция уже была выше, второй раз не раскрываем;
- *  cut — дальше есть вызовы, но глубина закончилась.
+ *  cut — дальше есть вызовы, но глубина закончилась;
+ *  synthetic — шаг без своей функции в проекте (запрос, express.json(), ответ…).
+ * Для маршрута веб-приложения сначала идёт путь запроса (route.chain), потом ошибки и ответ.
  */
-export function buildScenario(view, entryId, { depth = 4, maxSteps = 80, index } = {}) {
+export function buildScenario(view, entryId, { depth = 4, maxSteps = 120, index, method } = {}) {
   const itemById = Object.fromEntries(view.items.map((i) => [i.id, i]));
   const { bySrc, ordered } = index || sitesIndex(view);
   const childrenOf = (id) => {
@@ -67,23 +98,47 @@ export function buildScenario(view, entryId, { depth = 4, maxSteps = 80, index }
       const ctor = itemById[`${id}.__init__`] || itemById[`${id}.constructor`];
       return ctor ? [{ tgt: ctor.id, line: 0, kind: 'call', ctx: 'создание объекта' }] : [];
     }
+    if (it?.kind === 'entity') return []; // сущность — конец цепочки: дальше база данных
     const seen = new Set();
-    return (bySrc[id] || []).filter((s) => { const k = `${s.tgt}:${s.kind}`; if (seen.has(k)) return false; seen.add(k); return true; });
+    return (bySrc[id] || []).filter((s) => { const k = `${s.tgt}:${s.kind}:${s.label || ''}`; if (seen.has(k)) return false; seen.add(k); return true; });
   };
   const steps = [];
   const shown = new Set();
   let truncated = false;
-  (function dfs(id, d, parent, via) {
+  const push = (st) => { const n = steps.length + 1; steps.push({ n, depth: 0, parent: 0, line: 0, kind: 'call', ctx: '', repeat: false, cut: false, role: '', label: '', about: '', ...st }); return n; };
+  function dfs(id, d, parent, via, extra = {}) {
     if (steps.length >= maxSteps) { truncated = true; return; }
-    const n = steps.length + 1;
+    if (!itemById[id]) return;
     const repeat = shown.has(id);
     const kids = repeat ? [] : childrenOf(id);
-    const step = { n, id, depth: d, parent, line: via?.line || 0, kind: via?.kind || 'call', ctx: via?.ctx || '', repeat, cut: !repeat && d >= depth && kids.length > 0 };
-    steps.push(step);
+    const n = push({
+      id, depth: d, parent, line: via?.line || 0, kind: via?.kind || 'call', ctx: via?.ctx || '', repeat, cut: !repeat && d >= depth && kids.length > 0,
+      role: extra.role || roleOf(view, id), label: via?.label || extra.label || '', about: extra.about || '',
+    });
     shown.add(id);
     if (repeat || d >= depth) return;
     for (const k of kids) dfs(k.tgt, d + 1, n, k);
-  })(entryId, 0, 0, null);
-  const hash = hashStr(steps.map((s) => `${s.id}@${itemById[s.id]?.hash || ''}`).join('|'));
-  return { entry: entryId, depth, steps, ordered, truncated, hash };
+  }
+  const route = routeOf(view, entryId, method);
+  if (route) {
+    const top = push({ id: null, synthetic: true, role: 'request', label: `${route.method} ${route.path}`, about: 'запрос приходит в приложение', file: route.file, line: route.line });
+    for (const st of route.chain) {
+      if (st.id && itemById[st.id]) dfs(st.id, 1, top, { line: 0, kind: 'call', ctx: '', label: st.label }, { role: st.role === 'handler' ? 'controller' : st.role, about: st.about });
+      else push({ id: null, synthetic: true, depth: 1, parent: top, role: st.role, label: st.label, about: st.about, file: st.file, line: st.line || 0 });
+    }
+    const outs = route.out || [];
+    if (outs.some((o) => o.kind === 'response' || o.kind === 'return')) {
+      const codes = [...new Set(outs.filter((o) => o.kind === 'response' || o.kind === 'return').map((o) => o.status).filter(Boolean))];
+      push({ id: null, synthetic: true, depth: 1, parent: top, role: 'response', label: `ответ${codes.length ? ` ${codes.join(' / ')}` : ''}`, about: outs.filter((o) => o.kind === 'response' || o.kind === 'return').map((o) => `${o.status ? `${o.status} · ` : ''}${o.text}`).join('\n'), file: route.handlerFile, line: outs.find((o) => o.kind === 'response' || o.kind === 'return')?.line || 0 });
+    }
+    if (route.errors?.length) {
+      const errTop = push({ id: null, synthetic: true, depth: 1, parent: top, role: 'error-branch', label: 'если случится ошибка', about: outs.filter((o) => o.kind === 'throw' || o.kind === 'next').map((o) => `${o.text} (стр. ${o.line})`).join('\n') });
+      for (const st of route.errors) {
+        if (st.id && itemById[st.id]) dfs(st.id, 2, errTop, { line: 0, kind: 'call', ctx: '' }, { role: 'error', about: st.about });
+        else push({ id: null, synthetic: true, depth: 2, parent: errTop, role: 'error', label: st.label, about: st.about, file: st.file, line: st.line || 0 });
+      }
+    }
+  } else dfs(entryId, 0, 0, null);
+  const hash = hashStr(steps.map((s) => `${s.id || s.label}@${itemById[s.id]?.hash || ''}`).join('|'));
+  return { entry: entryId, depth, steps, ordered, truncated, hash, route };
 }

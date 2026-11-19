@@ -5,12 +5,20 @@ import { useDispatch, useSelector } from 'react-redux';
 import { go, runStory, toast } from '../../app/store';
 import CodeView from '../../components/CodeView';
 import { BackIcon, NextIcon, PathIcon, SparkIcon } from '../../components/icons';
-import { entryPoints, buildScenario } from '../../../core/scenario.js';
+import { entryPoints, buildScenario, ROLE_RU } from '../../../core/scenario.js';
 import { useCode } from './useCode';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
 
 const DEPTHS = [2, 3, 4, 6];
+// цвет роли шага на пути запроса
+const ROLE_TONE = {
+  request: 'text-stone border-mist-dim', router: 'text-mist border-hairline', middleware: 'text-[#9AA5C9] border-[#9AA5C9]/40',
+  auth: 'text-[#D98787] border-[#D98787]/40', validate: 'text-[#C8B27A] border-[#C8B27A]/40', dependency: 'text-[#9AA5C9] border-[#9AA5C9]/40',
+  controller: 'text-bronze border-bronze/50', service: 'text-[#7FA08A] border-[#7FA08A]/40', repository: 'text-[#8FB59A] border-[#8FB59A]/40',
+  entity: 'text-[#A9C2D8] border-[#A9C2D8]/40', data: 'text-mist border-hairline', schema: 'text-[#C8B27A] border-[#C8B27A]/40', response: 'text-[#7FA08A] border-[#7FA08A]/50', 'error-branch': 'text-[#D98787] border-[#D98787]/40', error: 'text-[#D98787] border-[#D98787]/40',
+};
+export const RoleChip = ({ role }) => (role ? <span className={`text-[9.5px] font-mono uppercase tracking-wide border rounded px-1 py-[1px] flex-shrink-0 ${ROLE_TONE[role] || 'text-mist border-hairline'}`}>{ROLE_RU[role] || role}</span> : null);
 const DEFAULT_DEPTH = 4;
 // router.post("/chat", response_model=…) → POST /chat
 export function routeLabel(it) {
@@ -45,8 +53,36 @@ export function ScenarioList({ view, ix }) {
         <label htmlFor="sc-q" className="sr-only">Найти начало сценария</label>
         <input id="sc-q" className="input py-2" placeholder={`Найти среди ${total}…`} value={q} onChange={(e) => setQ(e.target.value)} autoComplete="off" spellCheck={false} />
       </div>
+      {(view.web?.routes || []).length > 0 && (() => {
+        const rs = view.web.routes.filter((r) => !s || `${r.method} ${r.path} ${ix.itemById[r.chain.find((c) => c.role === 'handler')?.id || r.id]?.name || ''}`.toLowerCase().includes(s));
+        if (!rs.length) return null;
+        const limit = open.__routes || s ? rs.length : 16;
+        return (
+          <section className="mt-6">
+            <div className="flex items-baseline gap-2"><h2 className="font-display font-semibold text-[16px]">Запросы к приложению</h2><span className="font-mono text-[11px] text-mist-dim">{rs.length}</span></div>
+            <div className="text-[12.5px] text-mist mt-0.5 mb-2.5">Что происходит с запросом от прихода до ответа: промежуточные обработчики, проверки доступа и данных, обработчик, сервисы, база данных, ответ и ошибки.</div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+              {rs.slice(0, limit).map((r) => {
+                const h = ix.itemById[r.chain.find((c) => c.role === 'handler')?.id] || ix.itemById[r.id];
+                const st = stories[r.id];
+                return (
+                  <button key={`${r.method} ${r.path} ${r.id}`} onClick={() => dispatch(go({ t: 'scenario', id: r.id, method: r.method }))}
+                    className="text-left card px-3.5 py-2.5 hover:border-bronze/60 transition-colors" style={{ borderLeft: `3px solid ${layerColor(view, ix.fileByPath[h?.file]?.layer)}` }}>
+                    {st?.title && <div className="font-display text-[14px] text-stone leading-snug">{st.title}</div>}
+                    <div className="font-mono text-[12.5px] truncate"><span className="text-bronze/90">{r.method}</span> {r.path}</div>
+                    <div className="flex flex-wrap gap-1 mt-1.5">{r.chain.map((c, i) => <RoleChip key={i} role={c.role === 'handler' ? 'controller' : c.role} />)}</div>
+                    <div className="font-mono text-[10.5px] text-mist-dim truncate mt-1">{h ? `${h.name} · ${h.file}` : r.file}</div>
+                  </button>
+                );
+              })}
+            </div>
+            {rs.length > limit && <button className="btn-ghost mt-2" onClick={() => setOpen((o) => ({ ...o, __routes: true }))}>Показать все {rs.length}</button>}
+          </section>
+        );
+      })()}
       {groups.length === 0 && <div className="text-[13.5px] text-mist">В этом коде не нашлось точек входа: маршрутов, обработчиков, main. Сценарий можно начать с любой функции — кнопка «Пройти сценарий отсюда» на её странице.</div>}
-      {groups.map((g) => {
+      {groups.map((g0) => {
+        const g = g0.title === 'Маршруты API' && view.web?.routes?.length ? { ...g0, title: 'Другие маршруты', ids: g0.ids.filter((id) => !view.web.routes.some((r) => r.id === id)) } : g0;
         const ids = s ? g.ids.filter((id) => ix.itemById[id].name.toLowerCase().includes(s) || (ix.itemById[id].route || '').toLowerCase().includes(s)) : g.ids;
         if (!ids.length) return null;
         const limit = open[g.title] || s ? ids.length : 12;
@@ -87,7 +123,10 @@ function StepRow({ step, it, active, onClick, story }) {
       {step.ctx && <div className="font-mono text-[10.5px] text-bronze/80 truncate">{step.ctx}</div>}
       <div className="flex items-center gap-2 min-w-0">
         <span className="font-mono text-[10.5px] text-mist-dim w-6 flex-shrink-0 text-right">{step.n}</span>
-        <span className={`font-mono text-[12.5px] truncate ${step.repeat ? 'text-mist' : ''}`}>{it?.name}</span>
+        <RoleChip role={step.role} />
+        <span className={`font-mono text-[12.5px] truncate ${step.repeat || step.synthetic ? 'text-mist' : ''} ${step.role === 'request' ? 'text-stone' : ''}`}>
+          {step.synthetic ? step.label : step.label && step.label !== it?.name ? <>{step.label} <span className="text-mist-dim">→ {it?.name}</span></> : it?.name}
+        </span>
         {step.kind === 'ref' && <span className="text-[10px] text-mist border border-dashed border-mist-dim rounded px-1 flex-shrink-0">передаётся</span>}
         {step.repeat && <span className="text-[10.5px] text-mist-dim flex-shrink-0">↩ было выше</span>}
         {step.cut && <span className="text-[10.5px] text-mist-dim flex-shrink-0">… дальше</span>}
@@ -130,10 +169,10 @@ function StoryButton({ view, id, depth, story, fresh }) {
   );
 }
 
-export function ScenarioView({ view, ix, id }) {
+export function ScenarioView({ view, ix, id, method }) {
   const dispatch = useDispatch();
   const [depth, setDepth] = useState(() => (view.stories || []).find((s) => s.entry === id)?.depth || DEFAULT_DEPTH);
-  const sc = useMemo(() => buildScenario(view, id, { depth, index: ix.sites }), [view, id, depth, ix]);
+  const sc = useMemo(() => buildScenario(view, id, { depth, index: ix.sites, method }), [view, id, depth, ix, method]);
   const story = (view.stories || []).find((s) => s.entry === id && s.depth === depth);
   const fresh = story && story.hash === sc.hash;
   const [cur, setCur] = useState(1);
@@ -145,10 +184,12 @@ export function ScenarioView({ view, ix, id }) {
   const parent = step.parent ? sc.steps[step.parent - 1] : null;
   const pit = parent && ix.itemById[parent.id];
   const children = sc.steps.filter((s) => s.parent === step.n);
-  const showIt = where && pit ? pit : it;
-  const code = useCode(view, showIt.file);
-  const lang = ix.fileByPath[showIt.file]?.lang;
   const entry = ix.itemById[id];
+  const showIt = where && pit ? pit : it;
+  const codeFile = step.synthetic ? (step.file || entry.file) : showIt.file;
+  const code = useCode(view, codeFile);
+  const lang = ix.fileByPath[codeFile]?.lang;
+  const route = sc.route;
 
   useEffect(() => {
     const h = (e) => {
@@ -168,9 +209,10 @@ export function ScenarioView({ view, ix, id }) {
   return (
     <div>
       <div className="label-mono mb-1.5 flex items-center gap-2"><PathIcon className="w-3.5 h-3.5" />Сценарий</div>
-      <h1 className="font-display font-semibold text-[22px] leading-snug">{story?.title || entry.name}</h1>
+      <h1 className="font-display font-semibold text-[22px] leading-snug">{story?.title || (route ? <span className="font-mono">{route.method} {route.path}</span> : entry.name)}</h1>
       <div className="font-mono text-[11px] text-mist-dim mt-1">
-        {story?.title ? `${entry.name} · ` : ''}{entry.file}:{entry.line}{routeLabel(entry) && entry.kind !== 'route' ? ` · ${routeLabel(entry)}` : ''}
+        {route ? `путь запроса · ${{ express: 'Express', fastify: 'Fastify', nest: 'NestJS', fastapi: 'FastAPI', flask: 'Flask' }[route.fw] || route.fw} · ` : ''}
+        {story?.title && !route ? `${entry.name} · ` : ''}{entry.file}:{entry.line}{routeLabel(entry) && entry.kind !== 'route' && !route ? ` · ${routeLabel(entry)}` : ''}
       </div>
 
       <div className="flex items-center gap-2 mt-4 flex-wrap">
@@ -206,28 +248,43 @@ export function ScenarioView({ view, ix, id }) {
             <span className="text-[11px] text-mist-dim hidden md:inline">или стрелки на клавиатуре</span>
           </div>
 
-          <div className="mt-4 flex items-center gap-2 flex-wrap">
-            <span className="font-mono text-[9.5px] uppercase tracking-wide text-mist-dim border border-hairline rounded px-1.5 py-[1px]">{KIND_RU[it.kind] || it.kind}</span>
-            <h2 className="font-mono text-[17px] break-all">{it.name}</h2>
-          </div>
-          <div className="font-mono text-[11px] text-mist-dim mt-1">{it.file}:{it.line}–{it.end}</div>
-          {parent && (
-            <div className="text-[13px] text-mist mt-2 leading-relaxed">
-              {step.kind === 'ref' ? 'Передаётся из ' : 'Вызывается из '}
-              <button className="font-mono text-stone hover:text-bronze" onClick={() => setCur(parent.n)}>{pit.name}</button>
-              {step.line ? <>, строка {step.line}</> : null}
-              {step.ctx && <> — внутри <span className="font-mono text-bronze/90">{step.ctx}</span></>}
-              {step.kind === 'ref' && '. Здесь функция не вызывается сразу: её отдают дальше (в onClick, аргументом, в список), и вызовут позже.'}
-            </div>
+          {step.synthetic ? (
+            <>
+              <div className="mt-4 flex items-center gap-2 flex-wrap"><RoleChip role={step.role} /><h2 className="font-mono text-[17px] break-all">{step.label}</h2></div>
+              {step.about && <div className="text-[13.5px] text-stone mt-2 leading-relaxed whitespace-pre-wrap">{step.about}</div>}
+              {step.role === 'request' && route && <div className="text-[13px] text-mist mt-2 leading-relaxed">Дальше по шагам — всё, через что пройдёт запрос: {route.chain.map((c) => ROLE_RU[c.role === 'handler' ? 'controller' : c.role]).join(' → ')}{route.errors?.length ? ', а при ошибке — обработчик ошибок' : ''}.</div>}
+            </>
+          ) : (
+            <>
+              <div className="mt-4 flex items-center gap-2 flex-wrap">
+                <RoleChip role={step.role} />
+                <span className="font-mono text-[9.5px] uppercase tracking-wide text-mist-dim border border-hairline rounded px-1.5 py-[1px]">{KIND_RU[it.kind] || it.kind}</span>
+                <h2 className="font-mono text-[17px] break-all">{step.label && step.label !== it.name ? <>{step.label} <span className="text-mist">→ {it.name}</span></> : it.name}</h2>
+              </div>
+              <div className="font-mono text-[11px] text-mist-dim mt-1">{it.file}:{it.line}–{it.end}</div>
+              {step.about && <div className="text-[13px] text-mist mt-1.5">{step.about}</div>}
+              {parent && step.line > 0 && pit && (
+                <div className="text-[13px] text-mist mt-2 leading-relaxed">
+                  {step.kind === 'ref' ? 'Передаётся из ' : 'Вызывается из '}
+                  <button className="font-mono text-stone hover:text-bronze" onClick={() => setCur(parent.n)}>{pit.name}</button>
+                  {step.line ? <>, строка {step.line}</> : null}
+                  {step.ctx && <> — внутри <span className="font-mono text-bronze/90">{step.ctx}</span></>}
+                  {step.kind === 'ref' && '. Здесь функция не вызывается сразу: её отдают дальше (в onClick, аргументом, в список), и вызовут позже.'}
+                </div>
+              )}
+            </>
           )}
           {step.repeat && <div className="text-[13px] text-mist mt-2">Эта функция уже встречалась выше — второй раз её шаги не раскрываются.</div>}
           {step.cut && <div className="text-[13px] text-mist mt-2">Дальше есть вызовы, но глубина сценария закончилась. Увеличь глубину или пройди сценарий отсюда.</div>}
 
           {text && <div className="mt-3 rounded-xl bg-panel border border-bronze/30 px-4 py-3 text-[14px] leading-relaxed">{text}</div>}
-          {!text && (expl?.what || it.phrase) && <div className="mt-3 text-[13.5px] leading-relaxed text-stone">{expl?.what || it.phrase}</div>}
+          {!text && !step.synthetic && (expl?.what || it.phrase) && <div className="mt-3 text-[13.5px] leading-relaxed text-stone">{expl?.what || it.phrase}</div>}
 
+          {step.synthetic ? (step.file && step.line > 0 && code !== null && (
+            <div className="mt-4"><CodeView code={code} lang={lang} from={Math.max(1, step.line - 2)} to={step.line + 8} focus={step.line} mark={[step.line, step.line]} maxHeight="40vh" /></div>
+          )) : (<>
           <div className="flex items-center gap-2 mt-4 mb-2 flex-wrap">
-            {parent && step.line > 0 && (
+            {parent && step.line > 0 && pit && (
               <div className="flex rounded-lg border border-hairline overflow-hidden text-[12px]">
                 <button className={`px-2.5 py-1 ${!where ? 'bg-panel-2 text-bronze' : 'text-mist hover:text-stone'}`} onClick={() => setWhere(false)}>Код шага</button>
                 <button className={`px-2.5 py-1 ${where ? 'bg-panel-2 text-bronze' : 'text-mist hover:text-stone'}`} onClick={() => setWhere(true)}>Где вызывается</button>
@@ -251,6 +308,7 @@ export function ScenarioView({ view, ix, id }) {
               ))}
             </div>
           )}
+          </>)}
         </div>
       </div>
     </div>

@@ -3,7 +3,16 @@
 // текст; структуру (функции, строки, связи) она не придумывает.
 import { callModel, costOf, extractJson, LlmError } from './llm.js';
 
-const KIND_RU = { function: 'функция', method: 'метод', class: 'класс', component: 'React-компонент', hook: 'React-хук', route: 'маршрут' };
+const KIND_RU = { function: 'функция', method: 'метод', class: 'класс', component: 'React-компонент', hook: 'React-хук', route: 'маршрут', entity: 'сущность' };
+const ORM_RU = { sequelize: 'Sequelize', mongoose: 'Mongoose', typeorm: 'TypeORM', prisma: 'Prisma', sqlalchemy: 'SQLAlchemy', sqlmodel: 'SQLModel', pydantic: 'Pydantic (схема данных)', dataclass: 'dataclass', django: 'Django', dto: 'DTO с проверками' };
+const REL_RU = { belongsTo: 'принадлежит', hasMany: 'имеет много', hasOne: 'имеет одну', belongsToMany: 'многие-ко-многим с' };
+
+/** Сущность в одну-две строки для подсказки модели. */
+export function entityBrief(e, nameOf) {
+  const f = e.fields.slice(0, 30).map((x) => `${x.name}${x.type ? ` ${x.type}` : ''}${x.pk ? ' ключ' : ''}${x.required ? ' обязательное' : ''}${x.unique ? ' уникальное' : ''}${x.default ? ` по умолчанию ${x.default}` : ''}${x.ref ? ` ссылка на ${x.ref.model || x.ref.table}` : ''}${x.validate?.length ? ` проверки: ${x.validate.join(', ')}` : ''}`).join('; ');
+  const r = e.relations.map((x) => `${REL_RU[x.kind] || x.kind} ${nameOf(x.to)}${x.as ? ` (как ${x.as})` : ''}${x.through ? ` через ${nameOf(x.throughId || x.through)}` : ''}`).join('; ');
+  return `${ORM_RU[e.orm] || e.orm}${e.table ? `, таблица ${e.table}` : ''}. Поля: ${f || 'нет'}.${r ? ` Связи: ${r}.` : ''}${e.hooks?.length ? ` Хуки и проверки: ${e.hooks.join('; ')}.` : ''}`;
+}
 const MAX_PER_BATCH = 10;
 const WHOLE_FILE_LIMIT = 60_000; // символов: больше — отправляем только нужные функции
 const CHARS_PER_TOKEN = 3; // грубая оценка для смеси кода и русского текста
@@ -66,10 +75,12 @@ export function plan(view, getCode, scope, provider) {
 
 function batchPrompt(view, file, items, code, callers, callees, purpose) {
   const lang = view.files.find((f) => f.path === file)?.lang || '';
-  const name = (id) => id.split('::')[1];
+  const name = (id) => String(id).split('::').pop();
+  const ents = Object.fromEntries((view.entities || []).map((e) => [e.id, e]));
   const list = items.map((it) => {
     const inn = (callers[it.id] || []).slice(0, 8).map(name).join(', ') || 'нет в проекте';
     const out = (callees[it.id] || []).slice(0, 8).map(name).join(', ') || 'нет';
+    if (it.kind === 'entity' && ents[it.id]) return `- ${it.name} (сущность, строки ${it.line}–${it.end}). ${entityBrief(ents[it.id], name)} Используют: ${inn}.`;
     return `- ${it.name} (${KIND_RU[it.kind] || it.kind}, строки ${it.line}–${it.end}). Вызывают: ${inn}. Вызывает: ${out}.`;
   }).join('\n');
   const body = code.length <= WHOLE_FILE_LIMIT
@@ -100,7 +111,8 @@ ${list}
   ],
   "terms": [ { "term": "термин", "definition": "объяснение простыми словами" } ]
 }
-В "terms" — только термины, которые встретились в этом коде и которые новичок может не знать (0–5 штук).`;
+В "terms" — только термины, которые встретились в этом коде и которые новичок может не знать (0–5 штук).
+Для сущностей (моделей данных): в "what" — что она хранит и зачем проекту, в "io" — поля простыми словами (что значит каждое, какие ограничения), в "example" — пример одной записи с конкретными значениями, в "watch" — связи с другими сущностями (что значит «многие-ко-многим», какие методы появляются из связи, например setAuthors) и подводные камни.`;
 }
 
 function overviewPrompt(view) {

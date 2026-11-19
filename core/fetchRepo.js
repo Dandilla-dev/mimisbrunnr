@@ -25,7 +25,7 @@ function wanted(rel) {
   const parts = rel.split('/');
   if (parts.some((p) => SKIP_DIRS.has(p) || (p.startsWith('.') && p.length > 1))) return false;
   if (/\.min\.js$|\.d\.ts$|\.bundle\.js$/.test(rel)) return false;
-  return Boolean(grammarFor(rel));
+  return Boolean(grammarFor(rel)) || rel.endsWith(".prisma");
 }
 
 /** Разбирает строку пользователя: ссылка GitHub, owner/repo или путь к папке. */

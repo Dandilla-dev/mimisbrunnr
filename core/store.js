@@ -96,7 +96,10 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, lang TEXT, lines INT, doc TEXT, purpose TEXT, layer TEXT, error TEXT, code TEXT);
 CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY, file TEXT, name TEXT, kind TEXT, line INT, end_line INT, sig TEXT, route TEXT, doc TEXT, hash TEXT, ord INT);
 CREATE TABLE IF NOT EXISTS edges(src TEXT, dst TEXT, kind TEXT DEFAULT 'call');
-CREATE TABLE IF NOT EXISTS sites(src TEXT, dst TEXT, line INT, kind TEXT, ctx TEXT);
+CREATE TABLE IF NOT EXISTS sites(src TEXT, dst TEXT, line INT, kind TEXT, ctx TEXT, label TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS entities(id TEXT PRIMARY KEY, json TEXT);
+CREATE TABLE IF NOT EXISTS flows(id TEXT PRIMARY KEY, json TEXT);
+CREATE TABLE IF NOT EXISTS walks(id TEXT PRIMARY KEY, hash TEXT, steps TEXT, model TEXT, updated TEXT);
 CREATE TABLE IF NOT EXISTS stories(entry TEXT, depth INT, hash TEXT, title TEXT, summary TEXT, texts TEXT, model TEXT, updated TEXT, PRIMARY KEY(entry, depth));
 CREATE TABLE IF NOT EXISTS expl(id TEXT PRIMARY KEY, phrase TEXT, what TEXT, io TEXT, example TEXT, watch TEXT, hash TEXT, model TEXT, commit_short TEXT, updated TEXT, edited INT DEFAULT 0);
 CREATE TABLE IF NOT EXISTS layers(id TEXT PRIMARY KEY, name TEXT, description TEXT, ord INT);
@@ -128,7 +131,7 @@ export class Session {
     const oldFiles = Object.fromEntries(rows(db, 'SELECT path, purpose, layer FROM files').map((r) => [r.path, r]));
     db.run('BEGIN');
     try {
-      db.run('DELETE FROM files'); db.run('DELETE FROM items'); db.run('DELETE FROM edges'); db.run('DELETE FROM sites');
+      db.run('DELETE FROM files'); db.run('DELETE FROM items'); db.run('DELETE FROM edges'); db.run('DELETE FROM sites'); db.run('DELETE FROM entities'); db.run('DELETE FROM flows');
       if (layers) {
         db.run('DELETE FROM layers');
         layers.forEach((l, i) => db.run('INSERT INTO layers VALUES (?,?,?,?)', [l.id, l.name, l.description || '', i]));
@@ -146,10 +149,14 @@ export class Session {
       analysis.items.forEach((it, i) => db.run('INSERT INTO items VALUES (?,?,?,?,?,?,?,?,?,?,?)',
         [it.id, it.file, it.name, it.kind, it.line, it.end, it.sig, it.route, it.doc, it.hash, i]));
       for (const [a, b, k] of analysis.edges) db.run('INSERT INTO edges VALUES (?,?,?)', [a, b, k || 'call']);
-      for (const x of analysis.sites || []) db.run('INSERT INTO sites VALUES (?,?,?,?,?)', [x.src, x.tgt, x.line, x.kind, x.ctx || '']);
+      for (const x of analysis.sites || []) db.run('INSERT INTO sites VALUES (?,?,?,?,?,?)', [x.src, x.tgt, x.line, x.kind, x.ctx || '', x.label || '']);
+      for (const e of analysis.entities || []) db.run('INSERT OR REPLACE INTO entities VALUES (?,?)', [e.id, JSON.stringify(e)]);
+      for (const [id, f] of Object.entries(analysis.flows || {})) db.run('INSERT OR REPLACE INTO flows VALUES (?,?)', [id, JSON.stringify(f)]);
       db.run("DELETE FROM layers WHERE id NOT IN (SELECT DISTINCT layer FROM files) AND id='new'");
       db.run('COMMIT');
     } catch (e) { db.run('ROLLBACK'); throw e; }
+    this.setMeta('web', analysis.web || { routes: [] });
+    this.setMeta('roles', analysis.roles || {});
     this.setMeta('source', fetched.source);
     this.setMeta('commit', fetched.commit);
     if (layersSource) this.setMeta('layers_source', layersSource);
@@ -164,7 +171,14 @@ export class Session {
   }
   edges() { return rows(this.db, 'SELECT src, dst, kind FROM edges').map((r) => [r.src, r.dst, r.kind || 'call']); }
   /** Места связей по порядку в коде: [откуда, куда, строка, 'call'|'ref', условие]. В разборах до 0.2 их нет. */
-  sites() { return rows(this.db, 'SELECT src, dst, line, kind, ctx FROM sites ORDER BY src, line').map((r) => [r.src, r.dst, r.line, r.kind, r.ctx]); }
+  sites() { return rows(this.db, 'SELECT src, dst, line, kind, ctx, label FROM sites ORDER BY src, line').map((r) => [r.src, r.dst, r.line, r.kind, r.ctx, r.label || '']); }
+  entities() { return rows(this.db, 'SELECT json FROM entities').map((r) => JSON.parse(r.json)); }
+  flow(id) { const r = rows(this.db, 'SELECT json FROM flows WHERE id=?', [id])[0]; return r ? JSON.parse(r.json) : null; }
+  walks() { return Object.fromEntries(rows(this.db, 'SELECT * FROM walks').map((r) => [r.id, { hash: r.hash, steps: JSON.parse(r.steps || '[]'), model: r.model, updated: r.updated }])); }
+  saveWalk(id, steps, model) {
+    const it = rows(this.db, 'SELECT hash FROM items WHERE id=?', [id])[0];
+    this.db.run('INSERT OR REPLACE INTO walks VALUES (?,?,?,?,?)', [id, it?.hash || '', JSON.stringify(steps), model, now()]);
+  }
   stories() {
     return rows(this.db, 'SELECT * FROM stories').map((r) => ({ ...r, texts: JSON.parse(r.texts || '{}') }));
   }
@@ -200,6 +214,10 @@ export class Session {
       items,
       edges: this.edges(),
       sites: this.sites(),
+      entities: this.entities(),
+      web: this.meta('web', { routes: [] }),
+      roles: this.meta('roles', {}),
+      walks: this.walks(),
       stories: this.stories(),
       expl: Object.fromEntries(Object.entries(expl).filter(([k]) => ids.has(k))),
       orphans: Object.keys(expl).filter((k) => !ids.has(k)),
@@ -293,6 +311,7 @@ export class Sessions {
     db.run(SCHEMA);
     // разборы до 0.2: у связей не было вида (вызов / передача)
     if (!rows(db, 'PRAGMA table_info(edges)').some((c) => c.name === 'kind')) db.run("ALTER TABLE edges ADD COLUMN kind TEXT DEFAULT 'call'");
+    if (!rows(db, 'PRAGMA table_info(sites)').some((c) => c.name === 'label')) db.run("ALTER TABLE sites ADD COLUMN label TEXT DEFAULT ''");
     const s = new Session(file, db);
     this.open.set(id, s);
     return s;
