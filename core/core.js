@@ -15,8 +15,8 @@ function analyzeOffThread(sources) {
     w.once('error', (e) => reject(Object.assign(e, { noWorker: true })));
   });
 }
-import { plan, runExplain } from './explain.js';
-import { callModel, PRESETS, costOf } from './llm.js';
+import { plan, runExplain, startBatch, checkBatch, stopBatch } from './explain.js';
+import { callModel, PRESETS, costOf, batchUnsupported } from './llm.js';
 import { storyPlan, runStory } from './story.js';
 import { walkPlan, runWalk } from './walk.js';
 
@@ -155,7 +155,11 @@ export class MimisCore {
   async estimate(id, scope) {
     const s = await this.sessions.get(id);
     const p = plan(s.view(), (f) => s.code(f), scope, this.settings.data.provider);
-    return { count: p.count, requests: p.batches.length + (p.overview ? 1 : 0), estIn: p.estIn, estOut: p.estOut, estCost: p.estCost, priced: p.priced, overview: p.overview };
+    const job = s.meta('batch_job', null);
+    return {
+      count: p.count, requests: p.batches.length + (p.overview ? 1 : 0), estIn: p.estIn, estOut: p.estOut, estCost: p.estCost, priced: p.priced, overview: p.overview,
+      batch: { why: job ? 'Пакет уже отправлен — дождитесь результатов.' : batchUnsupported(this.settings.data.provider), estCost: p.estBatchCost },
+    };
   }
 
   async startExplain(id, scope, onProgress = () => {}) {
@@ -172,6 +176,33 @@ export class MimisCore {
       .finally(() => this.jobs.delete(id));
     return { promise };
   }
+  // ---- пакетный режим (вдвое дешевле, ответ в течение часа, максимум 24 ч) ----
+  _ctx(s) { return { session: s, settings: this.settings, provider: this.settings.data.provider, apiKey: this.settings.apiKey(), fetchFn: this.fetchFn }; }
+  async startBatch(id, scope) {
+    if (this.jobs.has(id)) throw new Error('Сейчас идёт объяснение — дождитесь окончания или остановите его.');
+    const s = await this.sessions.get(id);
+    await startBatch(this._ctx(s), scope);
+    return s.view();
+  }
+  /** Проверить пакет. Если готов — пояснения записываются; вернётся новый вид разбора. */
+  async checkBatch(id) {
+    if (this.jobs.has(id)) return { state: 'busy' };
+    const s = await this.sessions.get(id);
+    if (!s.meta('batch_job', null)) return { state: 'none' };
+    const ctrl = new AbortController();
+    this.jobs.set(id, { ctrl, state: { status: 'running', log: ['Забираю результаты пакета…'], done: 0, total: 0, spent: 0 } });
+    try {
+      const r = await checkBatch(this._ctx(s));
+      if (r.state === 'applied') this.log(`batch: ${r.result.done}/${r.result.total}, $${r.result.spent.toFixed(4)}`);
+      return { state: r.state, result: r.result || null, view: s.view() };
+    } finally { this.jobs.delete(id); }
+  }
+  async cancelBatch(id, forget = false) {
+    const s = await this.sessions.get(id);
+    await stopBatch(this._ctx(s), forget);
+    return s.view();
+  }
+
   stopExplain(id) { this.jobs.get(id)?.ctrl.abort(); }
   jobState(id) { return this.jobs.get(id)?.state || null; }
 

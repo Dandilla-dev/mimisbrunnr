@@ -226,6 +226,8 @@ export class Session {
       summary: this.meta('summary', ''),
       layersSource: this.meta('layers_source', 'folders'),
       lastUpdate: this.meta('last_update', null),
+      batch: (({ map, provider, ...j } = {}) => (j.id ? { ...j, model: provider?.model || '' } : null))(this.meta('batch_job', null) || undefined),
+      batchLast: this.meta('batch_last', null),
       files: rows(this.db, 'SELECT path, lang, lines, doc, purpose, layer, error FROM files ORDER BY path'),
       layers: rows(this.db, 'SELECT id, name, description FROM layers ORDER BY ord'),
       items,
@@ -266,6 +268,11 @@ export class Session {
     if (!it) throw new Error('Такой функции нет в текущем коде');
     this.db.run('UPDATE expl SET hash=?, commit_short=?, updated=?, branch=? WHERE id=?', [it.hash, this.meta('commit')?.short || '', now(), this.meta('source')?.branch || '', id]);
     this.snapshot(id);
+  }
+  /** Пояснение для другой версии кода функции (пришло из пакета, когда в разборе уже другая ветка). */
+  saveExplanationVersion(id, hash, entry, { model = '' } = {}) {
+    const r = { id, phrase: entry.phrase || '', what: entry.what || '', io: entry.io || '', example: entry.example || '', watch: entry.watch || '', hash, model, commit_short: '', updated: now(), edited: 0, branch: '' };
+    this.db.run('INSERT OR REPLACE INTO expl_versions VALUES (?,?,?)', [id, hash, JSON.stringify(r)]);
   }
   deleteExplanation(id) { this.db.run('DELETE FROM expl WHERE id=?', [id]); this.db.run('DELETE FROM expl_versions WHERE id=?', [id]); }
 

@@ -1,7 +1,7 @@
 // Объяснение с ИИ: что объясняем, сколько будет стоить, лимит, ход работы, остановка.
 import { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { reloadSession, setScreen, clearJob, refreshSessions } from '../../app/store';
+import { reloadSession, setScreen, clearJob, refreshSessions, toast } from '../../app/store';
 import { CloseIcon, SparkIcon } from '../../components/icons';
 
 const usd = (x) => (x < 0.01 ? `$${x.toFixed(4)}` : `$${x.toFixed(2)}`);
@@ -14,6 +14,8 @@ export default function ExplainDialog({ view, scope, onClose }) {
   const [est, setEst] = useState(null);
   const [err, setErr] = useState(null);
   const [budget, setBudget] = useState(String(settings.budgetUsd));
+  const [mode, setMode] = useState('now'); // now | batch
+  const [sending, setSending] = useState(false);
   const running = job?.status === 'running';
   const finished = job && job.status !== 'running';
   const p = settings.provider;
@@ -31,11 +33,24 @@ export default function ExplainDialog({ view, scope, onClose }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  const canBatch = est?.batch && !est.batch.why && est.count > 0;
+  const batch = mode === 'batch' && canBatch;
   async function start() {
     setErr(null);
+    const sc = { ...scope, budgetUsd: Math.max(0, Number(String(budget).replace(',', '.')) || 0) };
+    if (batch) {
+      setSending(true);
+      try {
+        await window.mimis.startBatch(view.id, sc);
+        await dispatch(reloadSession(view.id));
+        dispatch(toast('Пакет отправлен. Пояснения появятся, когда модель закончит — обычно в течение часа.'));
+        onClose();
+      } catch (e) { setErr(e.message); } finally { setSending(false); }
+      return;
+    }
     dispatch(clearJob());
     try {
-      await window.mimis.startExplain(view.id, { ...scope, budgetUsd: Math.max(0, Number(String(budget).replace(',', '.')) || 0) });
+      await window.mimis.startExplain(view.id, sc);
     } catch (e) { setErr(e.message); }
   }
   async function done() {
@@ -84,11 +99,31 @@ export default function ExplainDialog({ view, scope, onClose }) {
           </div>
         )}
 
+        {!job && est?.batch && est.count > 0 && (
+          <fieldset className="mt-4">
+            <legend className="label-mono mb-1.5">Как объяснять</legend>
+            <div className="grid gap-2">
+              {[
+                ['now', 'Сразу', 'Пояснения появляются по мере работы, за несколько минут.', est.priced ? usd(est.estCost) : '', ''],
+                ['batch', 'Пакетом — вдвое дешевле', 'Все запросы уходят модели одним пакетом. Модель делает их, когда у неё есть свободные мощности, поэтому берёт вдвое меньше. Ответ — обычно в течение часа, самое долгое — 24 часа. Приложение можно закрыть: пакет запомнится, и результаты заберутся при следующем открытии разбора.', est.priced ? usd(est.batch.estCost) : '', est.batch.why],
+              ].map(([id, title, text, price, why]) => (
+                <label key={id} className={`flex gap-3 rounded-xl border px-3.5 py-2.5 ${why ? 'opacity-60 cursor-not-allowed border-hairline-soft' : `cursor-pointer ${mode === id ? 'border-bronze/60 bg-panel-2' : 'border-hairline-soft hover:bg-panel-2'}`}`}>
+                  <input type="radio" name="ex-mode" className="mt-1 accent-bronze" checked={mode === id && !why} disabled={Boolean(why)} onChange={() => setMode(id)} />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-baseline justify-between gap-3"><b className="text-[13.5px]">{title}</b>{price && <span className="font-mono text-[12px] text-bronze">≈ {price}</span>}</span>
+                    <span className="block text-[12px] text-mist leading-relaxed mt-0.5">{why || text}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
+
         {!job && est?.priced && (
           <label className="block mt-4" htmlFor="ex-budget">
             <div className="label-mono mb-1.5">Лимит на этот запуск, $</div>
             <input id="ex-budget" className="input w-40" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} />
-            <div className="text-[11.5px] text-mist-dim mt-1">Дойдя до лимита, я остановлюсь; всё готовое сохранится, продолжить можно позже.</div>
+            <div className="text-[11.5px] text-mist-dim mt-1">{batch ? 'Если оценка пакета больше лимита, я его не отправлю.' : 'Дойдя до лимита, я остановлюсь; всё готовое сохранится, продолжить можно позже.'}</div>
           </label>
         )}
 
@@ -117,8 +152,8 @@ export default function ExplainDialog({ view, scope, onClose }) {
           {!job && (
             <>
               <button className="btn" onClick={onClose}>Отмена</button>
-              <button className="btn-bronze" onClick={start} disabled={!est || (est.count === 0 && !est.overview) || noModel || noKey}>
-                <SparkIcon className="w-4 h-4" />Начать
+              <button className="btn-bronze" onClick={start} disabled={!est || (est.count === 0 && !est.overview) || noModel || noKey || sending}>
+                <SparkIcon className="w-4 h-4" />{batch ? (sending ? 'Отправляю…' : 'Отправить пакет') : 'Начать'}
               </button>
             </>
           )}

@@ -52,39 +52,109 @@ const gh = http.createServer((req, res) => {
 
 // ---- поддельная модель ----
 let calls = 0;
+function answerFor(user) {
+  let answer;
+  if (user.includes('Разложи файлы по смысловым слоям')) {
+    const files = [...user.matchAll(/^- (\S+) \(/gm)].map((m) => m[1]);
+    const bare = [...user.matchAll(/^- (\S+) \([^)]*\)(?!:)/gm)].map((m) => m[1]);
+    answer = { file_purposes: Object.fromEntries(bare.map((f) => [f, 'Назначение из обзора.'])), summary: 'Тестовый обзор.', layers: [{ name: 'Первая половина', description: 'Тест', files: files.slice(0, Math.ceil(files.length / 2)) }, { name: 'Вторая половина', description: 'Тест', files: files.slice(Math.ceil(files.length / 2)) }] };
+  } else if (user.includes('одним словом')) {
+    answer = null;
+  } else if (user.includes('по шагам — так, чтобы ученик понял')) {
+    const ls = [...user.matchAll(/^\s*(\d+)\| /gm)].map((m) => Number(m[1]));
+    answer = { steps: [{ from: ls[0], to: ls[1] || ls[0], title: 'Начало', text: 'Шаг один.' }, { from: (ls[1] || ls[0]) + 1, to: ls[ls.length - 1], title: 'Конец', text: 'Шаг два.' }] };
+  } else if (user.includes('Разбираем сценарий')) {
+    const ns = [...user.matchAll(/^\s*(\d+)\. /gm)].map((m) => Number(m[1]));
+    answer = { title: 'Тестовый сценарий', summary: 'Сводка сценария.', steps: ns.map((n) => ({ n, text: `Шаг ${n}.` })) };
+  } else {
+    const names = [...user.matchAll(/^- (.+?) \((?:функция|метод|класс|React-компонент|React-хук|маршрут|сущность),/gm)].map((m) => m[1]);
+    answer = {
+      file_purpose: 'Тестовое назначение файла.',
+      items: names.map((n) => ({ name: n, phrase: `Фраза про ${n}`, what: `Что делает ${n}.`, io: 'Вход/выход.', example: 'Пример.', watch: 'Внимание.' })),
+      terms: [{ term: 'тест', definition: 'проверка' }],
+    };
+  }
+  const text = answer ? '```json\n' + JSON.stringify(answer) + '\n```' : 'Готов';
+  // отчитываемся о реалистичном расходе: ~480 токенов на одно пояснение
+  const usage = { in: Math.round(user.length / 3), out: Math.round(text.length / 3) + (answer?.items?.length || 0) * 480 };
+  return { text, usage };
+}
+// пакеты (Batch API): первая проверка — «ещё идёт», вторая — готово
+const batches = new Map();
+let batchSeq = 0;
+const files = new Map();
 const llm = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
+    res.setHeader('content-type', 'application/json');
+    const u = req.url;
+    // Anthropic
+    if (u === '/v1/messages/batches' && req.method === 'POST') {
+      assert.equal(req.headers['x-api-key'], 'test-key');
+      const id = `msgbatch_${++batchSeq}`;
+      batches.set(id, { reqs: JSON.parse(body).requests, polls: 0 });
+      return res.end(JSON.stringify({ id, processing_status: 'in_progress' }));
+    }
+    let m = u.match(/^\/v1\/messages\/batches\/([^/]+)(\/cancel)?$/);
+    if (m) {
+      const b = batches.get(m[1]);
+      if (!b) { res.statusCode = 404; return res.end('{"error":{"message":"not found"}}'); }
+      if (m[2]) { b.canceled = true; return res.end('{}'); }
+      b.polls += 1;
+      const ended = b.polls >= 2 || b.canceled;
+      const n = b.reqs.length;
+      return res.end(JSON.stringify({ id: m[1], processing_status: ended ? 'ended' : 'in_progress', request_counts: ended ? { processing: 0, succeeded: b.canceled ? 0 : n, errored: 0, canceled: b.canceled ? n : 0, expired: 0 } : { processing: n, succeeded: 0, errored: 0, canceled: 0, expired: 0 }, results_url: ended ? `http://127.0.0.1:${llmPort}/results/${m[1]}` : null }));
+    }
+    m = u.match(/^\/results\/(.+)$/);
+    if (m) {
+      const b = batches.get(m[1]);
+      return res.end(b.reqs.map((q) => {
+        if (b.canceled) return JSON.stringify({ custom_id: q.custom_id, result: { type: 'canceled' } });
+        calls += 1;
+        const a = answerFor(q.params.messages[0].content);
+        return JSON.stringify({ custom_id: q.custom_id, result: { type: 'succeeded', message: { content: [{ type: 'text', text: a.text }], usage: { input_tokens: a.usage.in, output_tokens: a.usage.out }, stop_reason: 'end_turn' } } });
+      }).reverse().join('\n')); // порядок результатов не гарантирован
+    }
+    // OpenAI: файл → пакет → файл с ответами
+    if (u === '/v1/files' && req.method === 'POST') {
+      assert.match(req.headers['content-type'], /multipart\/form-data; boundary=/);
+      assert.match(body, /name="purpose"\r\n\r\nbatch/);
+      const content = body.split('\r\n\r\n').slice(2).join('\r\n\r\n').replace(/\r\n--[^\r\n]+--\r\n$/, '');
+      const id = `file-${++batchSeq}`;
+      files.set(id, content);
+      return res.end(JSON.stringify({ id }));
+    }
+    if (u === '/v1/batches' && req.method === 'POST') {
+      const j = JSON.parse(body);
+      assert.equal(j.endpoint, '/v1/chat/completions');
+      const id = `batch_${++batchSeq}`;
+      batches.set(id, { reqs: files.get(j.input_file_id).split('\n').map((l) => JSON.parse(l)), polls: 0 });
+      return res.end(JSON.stringify({ id, status: 'validating' }));
+    }
+    m = u.match(/^\/v1\/batches\/([^/]+)$/);
+    if (m) {
+      const b = batches.get(m[1]);
+      b.polls += 1;
+      const n = b.reqs.length;
+      if (b.polls < 2) return res.end(JSON.stringify({ id: m[1], status: 'in_progress', request_counts: { total: n, completed: 0, failed: 0 } }));
+      const out = `file-out-${m[1]}`;
+      files.set(out, b.reqs.map((q, k) => {
+        if (k === 0) return JSON.stringify({ custom_id: q.custom_id, response: null, error: { message: 'тестовая ошибка' } });
+        calls += 1;
+        const a = answerFor(q.body.messages[1].content);
+        return JSON.stringify({ custom_id: q.custom_id, response: { status_code: 200, body: { choices: [{ message: { content: a.text }, finish_reason: 'stop' }], usage: { prompt_tokens: a.usage.in, completion_tokens: a.usage.out } } }, error: null });
+      }).join('\n'));
+      return res.end(JSON.stringify({ id: m[1], status: 'completed', request_counts: { total: n, completed: n - 1, failed: 1 }, output_file_id: out }));
+    }
+    m = u.match(/^\/v1\/files\/([^/]+)\/content$/);
+    if (m) return res.end(files.get(m[1]));
+
     calls += 1;
     const j = JSON.parse(body);
-    const user = req.url.includes('/messages') ? j.messages[0].content : j.messages[1].content;
-    let answer;
-    if (user.includes('Разложи файлы по смысловым слоям')) {
-      const files = [...user.matchAll(/^- (\S+) \(/gm)].map((m) => m[1]);
-      const bare = [...user.matchAll(/^- (\S+) \([^)]*\)(?!:)/gm)].map((m) => m[1]);
-      answer = { file_purposes: Object.fromEntries(bare.map((f) => [f, 'Назначение из обзора.'])), summary: 'Тестовый обзор.', layers: [{ name: 'Первая половина', description: 'Тест', files: files.slice(0, Math.ceil(files.length / 2)) }, { name: 'Вторая половина', description: 'Тест', files: files.slice(Math.ceil(files.length / 2)) }] };
-    } else if (user.includes('одним словом')) {
-      answer = null;
-    } else if (user.includes('по шагам — так, чтобы ученик понял')) {
-      const ls = [...user.matchAll(/^\s*(\d+)\| /gm)].map((m) => Number(m[1]));
-      answer = { steps: [{ from: ls[0], to: ls[1] || ls[0], title: 'Начало', text: 'Шаг один.' }, { from: (ls[1] || ls[0]) + 1, to: ls[ls.length - 1], title: 'Конец', text: 'Шаг два.' }] };
-    } else if (user.includes('Разбираем сценарий')) {
-      const ns = [...user.matchAll(/^\s*(\d+)\. /gm)].map((m) => Number(m[1]));
-      answer = { title: 'Тестовый сценарий', summary: 'Сводка сценария.', steps: ns.map((n) => ({ n, text: `Шаг ${n}.` })) };
-    } else {
-      const names = [...user.matchAll(/^- (.+?) \((?:функция|метод|класс|React-компонент|React-хук|маршрут|сущность),/gm)].map((m) => m[1]);
-      answer = {
-        file_purpose: 'Тестовое назначение файла.',
-        items: names.map((n) => ({ name: n, phrase: `Фраза про ${n}`, what: `Что делает ${n}.`, io: 'Вход/выход.', example: 'Пример.', watch: 'Внимание.' })),
-        terms: [{ term: 'тест', definition: 'проверка' }],
-      };
-    }
-    const text = answer ? '```json\n' + JSON.stringify(answer) + '\n```' : 'Готов';
-    // отчитываемся о реалистичном расходе: ~480 токенов на одно пояснение
-    const usage = { in: Math.round(user.length / 3), out: Math.round(text.length / 3) + (answer?.items?.length || 0) * 480 };
-    res.setHeader('content-type', 'application/json');
-    if (req.url.includes('/messages')) {
+    const user = u.includes('/messages') ? j.messages[0].content : j.messages[1].content;
+    const { text, usage } = answerFor(user);
+    if (u.includes('/messages')) {
       assert.equal(req.headers['x-api-key'], 'test-key');
       res.end(JSON.stringify({ content: [{ type: 'text', text }], usage: { input_tokens: usage.in, output_tokens: usage.out }, stop_reason: 'end_turn' }));
     } else {
@@ -254,6 +324,66 @@ try {
   const t = await core.testConnection();
   assert.equal(t.reply, 'Готов');
   step('проверка подключения к модели');
+
+  // пакетный режим: вдвое дешевле, ответ позже; пакет переживает перезапуск
+  const pb = await core.createSession(PY);
+  const pe = await core.estimate(pb.id, { kind: 'all' });
+  assert.equal(pe.batch.why, '');
+  assert.ok(pe.batch.estCost < pe.estCost * 0.6 && pe.batch.estCost > pe.estCost * 0.4, `${pe.batch.estCost} / ${pe.estCost}`);
+  v = await core.startBatch(pb.id, { kind: 'all' });
+  assert.ok(v.batch?.id && v.batch.count === pe.count && !('map' in v.batch));
+  await assert.rejects(core.startBatch(pb.id, { kind: 'all' }), /уже отправлен/);
+  let cb = await core.checkBatch(pb.id);
+  assert.equal(cb.state, 'waiting');
+  assert.equal(cb.view.batch.last.total, pe.requests - (pe.overview ? 1 : 0));
+  const coreR = new MimisCore(path.join(tmp, 'data')); // приложение закрыли и открыли
+  coreR.updateSettings({});
+  cb = await coreR.checkBatch(pb.id);
+  assert.equal(cb.state, 'applied', JSON.stringify(cb.result?.log));
+  assert.equal(cb.view.batch, null);
+  assert.equal(cb.view.counts.fresh, cb.view.counts.total);
+  assert.equal(cb.view.layersSource, 'ai'); // обзор проекта — обычным запросом после пакета
+  assert.ok(cb.result.spent > 0 && cb.result.spent < pe.estCost);
+  assert.equal(cb.view.batchLast.done, pe.count);
+  step(`пакет (Anthropic): ${cb.result.done}/${cb.result.total} за $${cb.result.spent.toFixed(4)} вместо ~$${pe.estCost.toFixed(4)}; пакет пережил перезапуск`);
+  // отмена: пакет закрывается, ничего не записано
+  v = await coreR.startBatch(pb.id, { kind: 'file', file: 'app/rules.py', force: true });
+  v = await coreR.cancelBatch(pb.id);
+  assert.ok(v.batch.canceling);
+  cb = await coreR.checkBatch(pb.id);
+  assert.equal(cb.state, 'applied');
+  assert.equal(cb.result.done, 0);
+  assert.equal(cb.view.batch, null);
+  step('пакет: отмена');
+  // OpenAI: файл JSONL → пакет → файл с ответами; одна пачка с ошибкой
+  process.env.MIMIS_BATCH_ANY = '1';
+  coreR.updateSettings({ provider: { type: 'openai', baseUrl: `http://127.0.0.1:${llmPort}/v1`, model: 'fake', priceIn: 2, priceOut: 10 }, apiKey: 'sk-test' });
+  const ob = await coreR.estimate(pb.id, { kind: 'all', force: true });
+  await coreR.startBatch(pb.id, { kind: 'all', force: true });
+  assert.equal((await coreR.checkBatch(pb.id)).state, 'waiting');
+  cb = await coreR.checkBatch(pb.id);
+  assert.equal(cb.state, 'applied');
+  assert.ok(cb.result.errors > 0 && cb.result.done === ob.count - cb.result.errors, JSON.stringify(cb.result));
+  delete process.env.MIMIS_BATCH_ANY;
+  step(`пакет (OpenAI): ${cb.result.done} объяснено, ${cb.result.errors} не получилось — отмечено`);
+  // пакет шёл, а разбор переключили на другую ветку: пояснение ждёт свою версию кода
+  const s0 = await coreR.sessions.get(pb.id);
+  const { checkBatch: cbx, startBatch: sbx } = await import('../core/explain.js');
+  coreR.updateSettings({ provider: { type: 'anthropic', baseUrl: `http://127.0.0.1:${llmPort}`, model: 'fake-claude', priceIn: 2, priceOut: 10 }, apiKey: 'test-key' });
+  await sbx({ session: s0, settings: coreR.settings, provider: coreR.settings.data.provider, apiKey: 'test-key' }, { kind: 'item', id: 'app/rules.py::classify', force: true });
+  const job = s0.meta('batch_job');
+  const realHash = job.map.b0.hashes['app/rules.py::classify'];
+  job.map.b0.hashes['app/rules.py::classify'] = 'other-version';
+  s0.setMeta('batch_job', job);
+  const before = s0.view().expl['app/rules.py::classify'].what;
+  await cbx({ session: s0, settings: coreR.settings, apiKey: 'test-key' });
+  await cbx({ session: s0, settings: coreR.settings, apiKey: 'test-key' });
+  assert.equal(s0.view().expl['app/rules.py::classify'].what, before); // текущее не тронуто
+  assert.ok(s0.db.exec("SELECT 1 FROM expl_versions WHERE id='app/rules.py::classify' AND hash='other-version'")[0]);
+  assert.ok(realHash);
+  step('пакет и смена ветки: пояснение сохранено для той версии кода, которую отправляли');
+  coreR.deleteSession(pb.id);
+  core.sessions.open.delete(pb.id);
 
   // 5. ручная правка
   v = await core.saveExplanation(back.id, 'app/db.py::Database.transaction', { phrase: 'ф', what: 'Вручную', io: '', example: '', watch: '' });

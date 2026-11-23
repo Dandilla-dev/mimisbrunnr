@@ -130,6 +130,9 @@ app.whenReady().then(() => {
     return true;
   });
   handle('explain:stop', (id) => core.stopExplain(id));
+  handle('batch:start', (id, scope) => core.startBatch(id, scope));
+  handle('batch:check', (id) => core.checkBatch(id));
+  handle('batch:cancel', (id, forget) => core.cancelBatch(id, forget));
   handle('explain:state', (id) => core.jobState(id));
   handle('expl:save', (id, itemId, entry) => core.saveExplanation(id, itemId, entry));
   handle('expl:confirm', (id, itemId) => core.confirmExplanation(id, itemId));

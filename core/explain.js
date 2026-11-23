@@ -1,7 +1,7 @@
 // Конвейер пояснений: код сам режет репозиторий на функции и пачками по
 // файлам отдаёт модели вместе со связями из графа. Модель пишет только
 // текст; структуру (функции, строки, связи) она не придумывает.
-import { callModel, costOf, extractJson, LlmError } from './llm.js';
+import { callModel, costOf, extractJson, LlmError, batchCostOf, batchUnsupported, submitBatch, batchStatus, batchResults, cancelBatch } from './llm.js';
 
 const KIND_RU = { function: 'функция', method: 'метод', class: 'класс', component: 'React-компонент', hook: 'React-хук', route: 'маршрут', entity: 'сущность' };
 const ORM_RU = { sequelize: 'Sequelize', mongoose: 'Mongoose', typeorm: 'TypeORM', prisma: 'Prisma', sqlalchemy: 'SQLAlchemy', sqlmodel: 'SQLModel', pydantic: 'Pydantic (схема данных)', dataclass: 'dataclass', django: 'Django', dto: 'DTO с проверками' };
@@ -58,17 +58,18 @@ export function plan(view, getCode, scope, provider) {
     }
   }
   const overview = scope.kind === 'all' && view.layersSource !== 'ai' && view.files.length > 3;
-  if (overview) {
-    estIn += (view.files.length * 160 + 1200) / CHARS_PER_TOKEN;
-    estOut += 250 + view.files.length * 25;
-  }
-  estIn = Math.round(estIn * 1.15);
-  estOut = Math.round(estOut * 1.15);
+  // обзор проекта в пакет не идёт (ему нужны назначения файлов из пакета) — он всегда по обычной цене
+  const ovIn = overview ? (view.files.length * 160 + 1200) / CHARS_PER_TOKEN * 1.15 : 0;
+  const ovOut = overview ? (250 + view.files.length * 25) * 1.15 : 0;
+  const bIn = estIn * 1.15, bOut = estOut * 1.15;
+  estIn = Math.round(bIn + ovIn);
+  estOut = Math.round(bOut + ovOut);
   return {
     batches, overview,
     count: targets.length,
     estIn, estOut,
     estCost: costOf(provider, estIn, estOut),
+    estBatchCost: batchCostOf(provider, bIn, bOut) + costOf(provider, ovIn, ovOut),
     priced: Number(provider.priceIn) > 0 || Number(provider.priceOut) > 0,
   };
 }
@@ -147,28 +148,53 @@ function matchItems(items, answer) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * Запуск. ctx: { session, settings, provider, apiKey, fetchFn, signal, onProgress }
- * Сохраняет результат после каждой пачки: остановка ничего не теряет.
- */
-export async function runExplain(ctx, scope) {
-  const { session, provider, apiKey, onProgress = () => {}, signal } = ctx;
-  const view = session.view();
-  const getCode = (f) => session.code(f);
-  const p = plan(view, getCode, scope, provider);
-  const budget = Number(scope.budgetUsd ?? ctx.settings.data.budgetUsd) || 0;
+// функции, которые передаются (onClick={f}, аргументом), помечаем — модель не спутает с прямым вызовом
+const NOTE = { ref: ['передаётся', 'передаёт'], dispatch: ['одна из, по значению', 'одна из, по значению'], guess: ['предположительно', 'предположительно'] };
+function linksOf(view) {
   const callers = {}, callees = {};
-  // функции, которые передаются (onClick={f}, аргументом), помечаем — модель не спутает с прямым вызовом
-  const NOTE = { ref: ['передаётся', 'передаёт'], dispatch: ['одна из, по значению', 'одна из, по значению'], guess: ['предположительно', 'предположительно'] };
   for (const [a, b, k] of view.edges) { (callees[a] ||= []).push(NOTE[k] ? `${b} (${NOTE[k][0]})` : b); (callers[b] ||= []).push(NOTE[k] ? `${a} (${NOTE[k][1]})` : a); }
-  const itemById = Object.fromEntries(view.items.map((i) => [i.id, i]));
+  return { callers, callees };
+}
+const maxTokensFor = (n) => Math.min(16000, n * 900 + 800);
 
-  const st = { done: 0, total: p.count, spent: 0, inTok: 0, outTok: 0, file: '', log: [], status: 'running', errors: 0 };
-  const note = (m) => { if (m) st.log.push(m); if (st.log.length > 200) st.log.shift(); };
-  const log = (m) => { note(m); onProgress({ ...st }); };
-  const estPerBatch = p.batches.length ? p.estCost / p.batches.length : 0;
+/** Записать ответ модели по пачке. hashes — версии кода на момент отправки (для пакета, который шёл долго). */
+function applyAnswer(session, file, items, ans, model, hashes = null) {
+  const now = Object.fromEntries(session.items().map((i) => [i.id, i.hash]));
+  const matched = matchItems(items, ans);
+  for (const [it, a] of matched) {
+    const h = hashes?.[it.id];
+    if (!h || now[it.id] === h) session.saveExplanation(it.id, a, { model });
+    else session.saveExplanationVersion(it.id, h, a, { model }); // код с тех пор сменился (другая ветка) — пояснение ждёт свою версию
+  }
+  if (ans.file_purpose) session.setPurpose(file, String(ans.file_purpose).slice(0, 600));
+  session.addTerms(ans.terms);
+  return matched.length;
+}
 
-  async function ask(user, maxTokens, note) {
+async function runOverview(session, ask) {
+  const fresh = session.view();
+  const r = await ask(overviewPrompt(fresh), 6000, 'обзор проекта');
+  const ans = extractJson(r.text);
+  const known = new Set(fresh.files.map((f) => f.path));
+  const used = new Set();
+  const layers = (ans.layers || []).slice(0, 12).map((l, i) => {
+    const files = (l.files || []).filter((f) => known.has(f) && !used.has(f));
+    files.forEach((f) => used.add(f));
+    return { id: `A${i + 1}`, name: String(l.name || `Слой ${i + 1}`).slice(0, 60), description: String(l.description || '').slice(0, 400), files };
+  }).filter((l) => l.files.length);
+  const rest = [...known].filter((f) => !used.has(f));
+  if (rest.length) layers.push({ id: 'A99', name: 'Прочее', description: 'Файлы, которые модель не отнесла ни к одному слою', files: rest });
+  if (layers.length) session.setLayers(layers);
+  if (ans.summary) session.setMeta('summary', String(ans.summary).slice(0, 2000));
+  for (const [f, text] of Object.entries(ans.file_purposes || {})) {
+    if (known.has(f) && !fresh.files.find((x) => x.path === f)?.purpose) session.setPurpose(f, String(text).slice(0, 600));
+  }
+  session.save();
+}
+
+function asker(ctx, st, log) {
+  const { session, provider, apiKey, signal } = ctx;
+  return async function ask(user, maxTokens, note) {
     let attempt = 0;
     for (;;) {
       if (signal?.aborted) throw new LlmError('Остановлено.');
@@ -186,13 +212,33 @@ export async function runExplain(ctx, scope) {
         await sleep([3000, 8000, 20000][attempt - 1]);
       }
     }
-  }
+  };
+}
+
+/**
+ * Запуск. ctx: { session, settings, provider, apiKey, fetchFn, signal, onProgress }
+ * Сохраняет результат после каждой пачки: остановка ничего не теряет.
+ */
+export async function runExplain(ctx, scope) {
+  const { session, provider, apiKey, onProgress = () => {}, signal } = ctx;
+  const view = session.view();
+  const getCode = (f) => session.code(f);
+  const p = plan(view, getCode, scope, provider);
+  const budget = Number(scope.budgetUsd ?? ctx.settings.data.budgetUsd) || 0;
+  const { callers, callees } = linksOf(view);
+  const itemById = Object.fromEntries(view.items.map((i) => [i.id, i]));
+
+  const st = { done: 0, total: p.count, spent: 0, inTok: 0, outTok: 0, file: '', log: [], status: 'running', errors: 0 };
+  const note = (m) => { if (m) st.log.push(m); if (st.log.length > 200) st.log.shift(); };
+  const log = (m) => { note(m); onProgress({ ...st }); };
+  const estPerBatch = p.batches.length ? p.estCost / p.batches.length : 0;
+  const ask = asker(ctx, st, log);
 
   async function doBatch(file, ids, depth = 0) {
     const items = ids.map((id) => itemById[id]);
     const purpose = view.files.find((f) => f.path === file)?.purpose || '';
     const user = batchPrompt(view, file, items, getCode(file) || '', callers, callees, purpose);
-    const maxTokens = Math.min(16000, items.length * 900 + 800);
+    const maxTokens = maxTokensFor(items.length);
     let r = await ask(user, maxTokens, `${file}: ${items.length}`);
     let ans;
     try { ans = extractJson(r.text); } catch {
@@ -206,15 +252,12 @@ export async function runExplain(ctx, scope) {
       r = await ask(`${user}\n\nВажно: ответ должен быть только JSON, без какого-либо текста вокруг.`, maxTokens, `${file}: повтор`);
       ans = extractJson(r.text);
     }
-    const matched = matchItems(items, ans);
-    for (const [it, a] of matched) session.saveExplanation(it.id, a, { model: provider.model });
-    if (ans.file_purpose) session.setPurpose(file, String(ans.file_purpose).slice(0, 600));
-    session.addTerms(ans.terms);
+    const matched = applyAnswer(session, file, items, ans, provider.model);
     session.save();
-    st.done += matched.length;
-    if (matched.length < items.length) {
-      st.errors += items.length - matched.length;
-      log(`${file}: модель не вернула пояснения для ${items.length - matched.length} из ${items.length}.`);
+    st.done += matched;
+    if (matched < items.length) {
+      st.errors += items.length - matched;
+      log(`${file}: модель не вернула пояснения для ${items.length - matched} из ${items.length}.`);
     }
   }
 
@@ -240,24 +283,7 @@ export async function runExplain(ctx, scope) {
     if (st.status === 'running' && p.overview && !signal?.aborted) {
       st.file = 'обзор проекта';
       log('Раскладываю файлы по слоям и пишу обзор проекта…');
-      const fresh = session.view();
-      const r = await ask(overviewPrompt(fresh), 6000, 'обзор проекта');
-      const ans = extractJson(r.text);
-      const known = new Set(fresh.files.map((f) => f.path));
-      const used = new Set();
-      const layers = (ans.layers || []).slice(0, 12).map((l, i) => {
-        const files = (l.files || []).filter((f) => known.has(f) && !used.has(f));
-        files.forEach((f) => used.add(f));
-        return { id: `A${i + 1}`, name: String(l.name || `Слой ${i + 1}`).slice(0, 60), description: String(l.description || '').slice(0, 400), files };
-      }).filter((l) => l.files.length);
-      const rest = [...known].filter((f) => !used.has(f));
-      if (rest.length) layers.push({ id: 'A99', name: 'Прочее', description: 'Файлы, которые модель не отнесла ни к одному слою', files: rest });
-      if (layers.length) session.setLayers(layers);
-      if (ans.summary) session.setMeta('summary', String(ans.summary).slice(0, 2000));
-      for (const [f, text] of Object.entries(ans.file_purposes || {})) {
-        if (known.has(f) && !fresh.files.find((x) => x.path === f)?.purpose) session.setPurpose(f, String(text).slice(0, 600));
-      }
-      session.save();
+      await runOverview(session, ask);
     }
     if (st.status === 'running') st.status = signal?.aborted ? 'stopped' : 'done';
   } catch (e) {
@@ -268,4 +294,111 @@ export async function runExplain(ctx, scope) {
   st.file = '';
   log(st.status === 'done' ? `Готово: объяснено ${st.done} из ${st.total}.` : st.status === 'stopped' ? 'Остановлено. Готовое сохранено.' : '');
   return st;
+}
+
+// ---- Пакетный режим: все пачки уходят одним пакетом, ответ — в течение часа
+// (максимум 24 ч), цена вдвое ниже. Пакет записан в разборе, поэтому приложение
+// можно закрыть: результаты заберутся при следующем открытии.
+
+const pub = (job) => job && { id: job.id, created: job.created, count: job.count, requests: job.requests, estCost: job.estCost, model: job.provider.model, overview: job.overview, canceling: Boolean(job.canceling), last: job.last || null, scope: job.scope };
+export const batchInfo = (session) => pub(session.meta('batch_job', null));
+
+/** Отправить пакет. ctx: { session, settings, provider, apiKey, fetchFn } */
+export async function startBatch(ctx, scope) {
+  const { session, provider, apiKey } = ctx;
+  if (session.meta('batch_job', null)) throw new Error('Пакет уже отправлен — дождитесь результатов или отмените его.');
+  const why = batchUnsupported(provider);
+  if (why) throw new Error(why);
+  const view = session.view();
+  const getCode = (f) => session.code(f);
+  const p = plan(view, getCode, scope, provider);
+  if (!p.batches.length) throw new Error('Здесь всё уже объяснено — пакет не нужен.');
+  const budget = Number(scope.budgetUsd ?? ctx.settings.data.budgetUsd) || 0;
+  if (p.priced && budget > 0 && p.estBatchCost > budget) throw new Error(`Оценка ~$${p.estBatchCost.toFixed(3)} больше лимита на запуск ($${budget}). Поднимите лимит или объясните часть — файл или функцию.`);
+  const { callers, callees } = linksOf(view);
+  const itemById = Object.fromEntries(view.items.map((i) => [i.id, i]));
+  const map = {};
+  const reqs = p.batches.map((b, k) => {
+    const items = b.ids.map((id) => itemById[id]);
+    const purpose = view.files.find((f) => f.path === b.file)?.purpose || '';
+    map[`b${k}`] = { file: b.file, ids: b.ids, hashes: Object.fromEntries(items.map((i) => [i.id, i.hash])) };
+    return { id: `b${k}`, system: SYSTEM_PROMPT, user: batchPrompt(view, b.file, items, getCode(b.file) || '', callers, callees, purpose), maxTokens: maxTokensFor(items.length) };
+  });
+  const { batchId } = await submitBatch(provider, apiKey, reqs, { fetchFn: ctx.fetchFn });
+  const job = {
+    id: batchId, created: new Date().toISOString(), count: p.count, requests: reqs.length, estCost: p.estBatchCost,
+    provider: { type: provider.type, baseUrl: provider.baseUrl || '', model: provider.model, priceIn: provider.priceIn, priceOut: provider.priceOut },
+    overview: p.overview, map, scope: { kind: scope.kind, file: scope.file, id: scope.id },
+  };
+  session.setMeta('batch_job', job);
+  session.save();
+  return pub(job);
+}
+
+/**
+ * Проверить пакет; если готов — записать пояснения и убрать пакет.
+ * @returns { state: 'none'|'waiting'|'applied'|'lost', info, result? }
+ */
+export async function checkBatch(ctx) {
+  const { session, apiKey } = ctx;
+  const job = session.meta('batch_job', null);
+  if (!job) return { state: 'none', info: null };
+  const provider = job.provider;
+  let s;
+  try { s = await batchStatus(provider, apiKey, job.id, { fetchFn: ctx.fetchFn }); } catch (e) {
+    job.last = { checked: new Date().toISOString(), error: e.message };
+    session.setMeta('batch_job', job); session.save();
+    return { state: e.status === 404 ? 'lost' : 'waiting', info: pub(job) };
+  }
+  job.last = { checked: new Date().toISOString(), done: s.done, total: s.total, failed: s.failed, canceling: s.canceling, error: s.error };
+  if (!s.ended) { session.setMeta('batch_job', job); session.save(); return { state: 'waiting', info: pub(job) }; }
+
+  const results = await batchResults(provider, apiKey, s.ref, { fetchFn: ctx.fetchFn });
+  const view = session.view();
+  const items = Object.fromEntries(view.items.map((i) => [i.id, i]));
+  const st = { done: 0, total: job.count, spent: 0, inTok: 0, outTok: 0, errors: 0, log: [], status: 'done', file: '' };
+  const seen = new Set();
+  for (const r of results) {
+    const b = job.map[r.id];
+    if (!b || seen.has(r.id)) continue;
+    seen.add(r.id);
+    if (!r.ok) { st.errors += b.ids.length; st.log.push(`${b.file}: модель не ответила (${r.error}).`); continue; }
+    const cost = batchCostOf(provider, r.inTok, r.outTok);
+    st.spent += cost; st.inTok += r.inTok; st.outTok += r.outTok;
+    session.logUsage(provider.model, r.inTok, r.outTok, cost, `пакет · ${b.file}: ${b.ids.length}`);
+    ctx.settings.addSpend(cost);
+    let ans;
+    try { ans = extractJson(r.text); } catch { st.errors += b.ids.length; st.log.push(`${b.file}: ${r.truncated ? 'ответ обрезан' : 'ответ не в том формате'} — объясните этот файл ещё раз обычным способом.`); continue; }
+    // функция могла исчезнуть из кода, пока пакет шёл: берём её имя из ответа по сохранённому id
+    const list = b.ids.map((id) => items[id] || { id, name: id.split('::').pop(), file: b.file });
+    const n = applyAnswer(session, b.file, list, ans, provider.model, b.hashes);
+    st.done += n;
+    if (n < b.ids.length) st.errors += b.ids.length - n;
+  }
+  for (const [k, b] of Object.entries(job.map)) if (!seen.has(k)) st.errors += b.ids.length; // отменённые и просроченные
+  session.save();
+  if (job.overview && st.done > 0 && !s.canceling && !job.canceling) {
+    try {
+      const cur = { ...ctx, provider: ctx.provider?.model ? ctx.provider : provider };
+      await runOverview(session, asker(cur, st, (m) => st.log.push(m)));
+    } catch (e) { st.log.push(`Обзор проекта не получился: ${e.message}`); }
+  }
+  if (job.canceling) st.status = 'stopped';
+  st.log.push(`Пакет: объяснено ${st.done} из ${st.total}${st.errors ? `, не получилось ${st.errors}` : ''}.`);
+  session.setMeta('batch_job', null);
+  session.setMeta('batch_last', { at: new Date().toISOString(), done: st.done, total: st.total, errors: st.errors, spent: st.spent, log: st.log.slice(-20) });
+  session.save();
+  return { state: 'applied', info: null, result: st };
+}
+
+/** Отменить пакет. Готовое к этому моменту придёт при следующей проверке. */
+export async function stopBatch(ctx, forget = false) {
+  const { session, apiKey } = ctx;
+  const job = session.meta('batch_job', null);
+  if (!job) return null;
+  if (forget) { session.setMeta('batch_job', null); session.save(); return null; }
+  await cancelBatch(job.provider, apiKey, job.id, { fetchFn: ctx.fetchFn });
+  job.canceling = true;
+  session.setMeta('batch_job', job); session.save();
+  return pub(job);
 }

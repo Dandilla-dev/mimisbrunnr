@@ -7,6 +7,7 @@ import MapColumn from './MapColumn';
 import Panel from './Panel';
 import ExplainDialog from './ExplainDialog';
 import BranchPicker from './BranchPicker';
+import BatchBanner from './BatchBanner';
 import { BackIcon, RefreshIcon, SearchIcon, SparkIcon } from '../../components/icons';
 
 function Search({ view, onPick }) {
@@ -97,6 +98,7 @@ export default function SessionScreen() {
           </button>
         )}
       </header>
+      <BatchBanner view={view} />
       <div className="flex-1 min-h-0 flex">
         <MapColumn view={view} ix={ix} />
         <Panel view={view} ix={ix} onExplain={setExplain} />
