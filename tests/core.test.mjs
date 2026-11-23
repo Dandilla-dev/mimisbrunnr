@@ -534,6 +534,18 @@ try {
   assert.ok(v.orphans.includes('app/rules.py::_rule_night_time'));
   step(`обновление: изменено ${v.lastUpdate.changed}, новых ${v.lastUpdate.added}, удалено ${v.lastUpdate.removed}; устаревшие и новые помечены`);
 
+  // учебные проекты для тестов (tests/fixtures) — не часть разбираемого проекта
+  const fx = path.join(tmp, 'with_fixtures');
+  fs.mkdirSync(path.join(fx, 'tests/fixtures/shop'), { recursive: true });
+  fs.mkdirSync(path.join(fx, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(fx, 'src/main.js'), 'export function run() { return 1; }\n');
+  fs.writeFileSync(path.join(fx, 'tests/main.test.js'), "import { run } from '../src/main.js';\nexport function testRun() { return run(); }\n");
+  fs.writeFileSync(path.join(fx, 'tests/fixtures/shop/book.js'), "export class Book { constructor() { this.title = ''; } }\n");
+  const sfx = await core.createSession(fx);
+  assert.deepEqual(sfx.files.map((f) => f.path).sort(), ['src/main.js', 'tests/main.test.js']);
+  core.deleteSession(sfx.id);
+  step('папки fixtures/testdata (учебные проекты для тестов) не разбираются');
+
   // 11. сессии переживают перезапуск
   const core2 = new MimisCore(path.join(tmp, 'data'));
   const list = await core2.listSessions();

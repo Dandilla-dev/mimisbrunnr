@@ -11,6 +11,8 @@ import { grammarFor } from './parse/treesitter.js';
 const SKIP_DIRS = new Set([
   '.git', '.hg', '.svn', 'node_modules', '.venv', 'venv', 'env', '__pycache__', '.idea', '.vscode',
   '.pytest_cache', '.mypy_cache', 'dist', 'build', 'out', '.next', '.nuxt', 'coverage', '.cache', 'vendor', 'release',
+  // учебные мини-проекты для тестов: это не код самого проекта (иначе их сущности и маршруты смешаются с настоящими)
+  'fixtures', '__fixtures__', 'testdata',
 ]);
 const MAX_FILE = 400_000; // байт: больше — скорее сгенерированный или минифицированный файл
 const MAX_FILES = 4000;
