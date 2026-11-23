@@ -6,6 +6,7 @@ import { useIndex } from './useIndex';
 import MapColumn from './MapColumn';
 import Panel from './Panel';
 import ExplainDialog from './ExplainDialog';
+import BranchPicker from './BranchPicker';
 import { BackIcon, RefreshIcon, SearchIcon, SparkIcon } from '../../components/icons';
 
 function Search({ view, onPick }) {
@@ -74,7 +75,10 @@ export default function SessionScreen() {
       <header className="flex items-center gap-4 px-6 py-3 border-b border-hairline-soft">
         <button className="btn-ghost -ml-2" onClick={() => dispatch(setScreen('home'))} title="К списку разборов"><BackIcon className="w-4 h-4" />Разборы</button>
         <div className="min-w-0 flex-1">
-          <div className="font-display font-semibold text-[17px] truncate">{view.title}</div>
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="font-display font-semibold text-[17px] truncate">{view.title}</div>
+            <BranchPicker view={view} />
+          </div>
           <div className="font-mono text-[10.5px] text-mist-dim truncate">
             {view.commit?.short} · {view.commit?.date} · {view.commit?.subject}
           </div>

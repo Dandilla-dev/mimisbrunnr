@@ -11,8 +11,9 @@ export const loadState = createAsyncThunk('app/loadState', async () => {
 export const refreshSessions = createAsyncThunk('app/refreshSessions', () => api().listSessions());
 export const saveSettings = createAsyncThunk('app/saveSettings', (patch) => api().updateSettings(patch));
 
-export const createSession = createAsyncThunk('session/create', async (input, { dispatch }) => {
-  const view = await api().createSession(input);
+export const createSession = createAsyncThunk('session/create', async (arg, { dispatch }) => {
+  const { input, branch } = typeof arg === 'string' ? { input: arg, branch: null } : arg;
+  const view = await api().createSession(input, branch);
   dispatch(refreshSessions());
   return view;
 });
@@ -26,6 +27,11 @@ export const updateSession = createAsyncThunk('session/update', async (id, { dis
 export const runStory = createAsyncThunk('session/story', async ({ id, entry, depth }) => {
   const r = await api().runStory(id, entry, depth);
   return { ...r.view, storyResult: r.result };
+});
+export const switchBranch = createAsyncThunk('session/branch', async ({ id, branch }, { dispatch }) => {
+  const view = await api().switchBranch(id, branch);
+  dispatch(refreshSessions());
+  return view;
 });
 export const deleteSession = createAsyncThunk('session/delete', async (id, { dispatch }) => {
   await api().deleteSession(id);
@@ -55,7 +61,7 @@ const appSlice = createSlice({
     b.addCase(loadState.rejected, (s, a) => { s.ready = true; s.error = a.error.message; });
     b.addCase(refreshSessions.fulfilled, (s, a) => { s.sessions = a.payload; });
     b.addCase(saveSettings.fulfilled, (s, a) => { s.settings = a.payload; });
-    for (const t of [createSession, updateSession]) {
+    for (const t of [createSession, updateSession, switchBranch]) {
       b.addCase(t.pending, (s) => { s.loading = 'Начинаю…'; s.error = null; });
       b.addCase(t.fulfilled, (s) => { s.loading = null; s.screen = 'session'; });
       b.addCase(t.rejected, (s, a) => { s.loading = null; s.error = a.error.message; });
@@ -94,6 +100,7 @@ const sessionSlice = createSlice({
     b.addCase(reloadSession.fulfilled, setView);
     b.addCase(runStory.fulfilled, setView);
     b.addCase(updateSession.fulfilled, (s, a) => { setView(s, a); s.lastUpdate = a.payload.lastUpdate; });
+    b.addCase(switchBranch.fulfilled, (s, a) => { setView(s, a); s.lastUpdate = a.payload.lastUpdate; });
     b.addCase(deleteSession.fulfilled, (s) => { s.view = null; });
   },
 });

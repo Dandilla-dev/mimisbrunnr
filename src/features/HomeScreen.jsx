@@ -21,11 +21,12 @@ export default function HomeScreen() {
   const dispatch = useDispatch();
   const { settings, sessions, loading, error } = useSelector((s) => s.app);
   const [repo, setRepo] = useState('');
+  const [branch, setBranch] = useState(null);
   const [confirmId, setConfirmId] = useState(null);
 
   function start(e) {
     e.preventDefault();
-    if (repo.trim()) dispatch(createSession(repo.trim()));
+    if (repo.trim()) dispatch(createSession({ input: repo.trim(), branch }));
   }
   async function remove(id) {
     await dispatch(deleteSession(id));
@@ -41,7 +42,7 @@ export default function HomeScreen() {
 
         <form onSubmit={start} className="card p-5 mt-7">
           <div className="label-mono mb-2">Новый разбор</div>
-          <RepoInput id="h-repo" value={repo} onChange={setRepo} disabled={Boolean(loading)} />
+          <RepoInput id="h-repo" value={repo} onChange={setRepo} disabled={Boolean(loading)} branch={branch} onBranch={setBranch} />
           {error && <div className="font-mono text-[11.5px] text-danger-soft mt-2.5">{error}</div>}
           <div className="flex justify-end mt-3.5">
             <button type="submit" className="btn-bronze" disabled={!repo.trim() || Boolean(loading)}>{loading || 'Разобрать'}</button>
@@ -58,7 +59,7 @@ export default function HomeScreen() {
               <button className="flex-1 min-w-0 text-left" onClick={() => dispatch(openSession(s.id))}>
                 <div className="font-display font-semibold text-[16px] truncate">{s.title}</div>
                 <div className="font-mono text-[11px] text-mist-dim mt-1 truncate">
-                  {s.source?.type === 'local' ? s.source.path : s.source?.url}
+                  {s.source?.type === 'local' ? s.source.path : s.source?.url}{s.source?.branch ? ` · ветка ${s.source.branch}` : ''}
                   {s.commit?.short ? ` · ${s.commit.short}` : ''} · {s.files} файлов · обновлён {s.updated}
                 </div>
                 <div className="mt-2.5"><Coverage fresh={s.fresh} total={s.total} /></div>

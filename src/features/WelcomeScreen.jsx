@@ -17,12 +17,13 @@ export default function WelcomeScreen() {
   const { loading, error } = useSelector((s) => s.app);
   const [name, setName] = useState('');
   const [repo, setRepo] = useState('');
+  const [branch, setBranch] = useState(null);
 
   async function start(e) {
     e.preventDefault();
     if (!name.trim() || !repo.trim()) return;
     await dispatch(saveSettings({ name: name.trim() }));
-    dispatch(createSession(repo.trim()));
+    dispatch(createSession({ input: repo.trim(), branch }));
   }
 
   return (
@@ -58,7 +59,7 @@ export default function WelcomeScreen() {
           </label>
           <div>
             <div className="label-mono mb-1.5">Какой код разобрать?</div>
-            <RepoInput id="w-repo" value={repo} onChange={setRepo} disabled={Boolean(loading)} />
+            <RepoInput id="w-repo" value={repo} onChange={setRepo} branch={branch} onBranch={setBranch} disabled={Boolean(loading)} />
           </div>
           {error && <div className="font-mono text-[11.5px] text-danger-soft">{error}</div>}
           <button type="submit" className="btn-bronze mt-1" disabled={!name.trim() || !repo.trim() || Boolean(loading)}>

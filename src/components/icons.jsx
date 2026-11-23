@@ -46,3 +46,6 @@ export const NextIcon = (p) => (
 export const TableIcon = (p) => (
   <svg {...base} {...p}><rect x="4" y="5" width="16" height="14" rx="2" /><line x1="4" y1="10" x2="20" y2="10" /><line x1="10" y1="10" x2="10" y2="19" /></svg>
 );
+export const BranchIcon = (p) => (
+  <svg {...base} {...p}><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="8" r="2" /><path d="M6 7v10M18 10c0 4-6 3-11.5 7" /></svg>
+);

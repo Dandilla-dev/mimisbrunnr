@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { zipSync, strToU8 } from 'fflate';
 import { MimisCore } from '../core/core.js';
+import { localGitInfo } from '../core/fetchRepo.js';
 import { buildScenario, entryPoints } from '../core/scenario.js';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -33,10 +34,19 @@ function zipFolder(dir, prefix) {
   return Buffer.from(zipSync(entries));
 }
 const zipData = zipFolder(JS, 'example-js_app-abc1234');
+// ветка feature: та же корзина, но formatPrice переписана
+const JS2 = path.join(tmp, 'js_feature');
+fs.cpSync(JS, JS2, { recursive: true });
+fs.writeFileSync(path.join(JS2, 'src/utils/format.ts'), "export function formatPrice(n: number): string {\n  return `${Math.round(n)} руб.`;\n}\n");
+const zipFeature = zipFolder(JS2, 'example-js_app-fea7ure');
+let zipDownloads = 0;
 const gh = http.createServer((req, res) => {
   if (req.url === '/repos/example/js_app') return res.end(JSON.stringify({ default_branch: 'main' }));
+  if (req.url.startsWith('/repos/example/js_app/branches')) return res.end(JSON.stringify([{ name: 'main', commit: { sha: 'abc1234567890' } }, { name: 'feature', commit: { sha: 'fea7ure000000' } }]));
+  if (req.url.startsWith('/repos/example/js_app/commits/feature')) return res.end(JSON.stringify({ sha: 'fea7ure000000', commit: { message: 'Новая цена', committer: { date: '2026-11-20T10:00:00Z' } } }));
   if (req.url.startsWith('/repos/example/js_app/commits/')) return res.end(JSON.stringify({ sha: 'abc1234567890', commit: { message: 'Тестовый коммит\n\nтело', committer: { date: '2026-11-18T10:00:00Z' } } }));
-  if (req.url.startsWith('/example/js_app/zip/')) return res.end(zipData);
+  if (req.url.startsWith('/example/js_app/zip/fea7ure')) { zipDownloads += 1; return res.end(zipFeature); }
+  if (req.url.startsWith('/example/js_app/zip/')) { zipDownloads += 1; return res.end(zipData); }
   res.statusCode = 404; res.end('{}');
 });
 
@@ -198,6 +208,42 @@ try {
   step(`продолжение: объяснено ${v.counts.fresh}/${v.counts.total}, слои от ИИ: ${v.layers.map((l) => l.name).join(', ')}`);
   assert.ok(core.state().settings.monthSpend > 0);
   step(`счётчик расходов за месяц: $${core.state().settings.monthSpend.toFixed(4)}, в сессии $${v.usage.cost.toFixed(4)}`);
+
+  // ветки: список, переключение, пояснения для каждой версии кода, сохранённые копии
+  const FP = 'src/utils/format.ts::formatPrice';
+  const br = await core.branches(front.id, true);
+  assert.equal(br.current, 'main');
+  assert.deepEqual(br.list.map((b) => [b.name, b.cached]), [['main', true], ['feature', false]]);
+  const peek = await core.peekBranches('https://github.com/example/js_app');
+  assert.deepEqual(peek.list.map((b) => b.name), ['main', 'feature']);
+  const dl0 = zipDownloads;
+  v = await core.switchBranch(front.id, 'feature');
+  assert.equal(v.source.branch, 'feature');
+  assert.equal(v.commit.short, 'fea7ure');
+  assert.equal(v.items.find((i) => i.id === FP).status, 'stale'); // код другой — пояснение от main помечено
+  assert.equal(v.counts.fresh, v.counts.total - 1); // остальные функции те же — пояснения на месте
+  await (await core.startExplain(front.id, { kind: 'item', id: FP })).promise;
+  assert.equal((await core.view(front.id)).items.find((i) => i.id === FP).status, 'fresh');
+  v = await core.switchBranch(front.id, 'main');
+  assert.equal(v.items.find((i) => i.id === FP).status, 'fresh'); // вернулось пояснение для кода из main
+  assert.equal(v.expl[FP].branch, 'main');
+  v = await core.switchBranch(front.id, 'feature');
+  assert.equal(v.items.find((i) => i.id === FP).status, 'fresh'); // и для кода из feature
+  assert.equal(zipDownloads - dl0, 1); // feature скачана один раз, дальше — сохранённая копия
+  assert.ok((await core.branches(front.id)).list.every((b) => b.cached));
+  v = await core.switchBranch(front.id, 'main');
+  step('ветки: список, переключение, пояснения для каждой версии кода, без повторной загрузки');
+  // папка с git: ветки читаются из .git (git не запускается)
+  const gr = path.join(tmp, 'gitrepo', '.git');
+  fs.mkdirSync(path.join(gr, 'refs/heads/feature'), { recursive: true });
+  fs.writeFileSync(path.join(gr, 'HEAD'), 'ref: refs/heads/dev\n');
+  fs.writeFileSync(path.join(gr, 'refs/heads/dev'), 'a'.repeat(40));
+  fs.writeFileSync(path.join(gr, 'refs/heads/feature/login'), 'b'.repeat(40));
+  fs.writeFileSync(path.join(gr, 'packed-refs'), `# pack-refs\n${'c'.repeat(40)} refs/heads/main\n`);
+  fs.writeFileSync(path.join(gr, 'config'), '[remote "origin"]\n\turl = git@github.com:example/js_app.git\n');
+  const gi = localGitInfo(path.join(tmp, 'gitrepo'));
+  assert.deepEqual(gi, { current: 'dev', branches: ['dev', 'feature/login', 'main'], remote: { owner: 'example', repo: 'js_app' } });
+  step('папка с git: текущая ветка, список веток и адрес на GitHub — из файлов .git');
 
   // 4. формат Anthropic, одна функция
   core.updateSettings({ provider: { type: 'anthropic', baseUrl: `http://127.0.0.1:${llmPort}`, model: 'fake-claude', priceIn: 2, priceOut: 10 }, apiKey: 'test-key' });

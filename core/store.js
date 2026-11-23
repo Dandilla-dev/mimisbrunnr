@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS flows(id TEXT PRIMARY KEY, json TEXT);
 CREATE TABLE IF NOT EXISTS walks(id TEXT PRIMARY KEY, hash TEXT, steps TEXT, model TEXT, updated TEXT);
 CREATE TABLE IF NOT EXISTS stories(entry TEXT, depth INT, hash TEXT, title TEXT, summary TEXT, texts TEXT, model TEXT, updated TEXT, PRIMARY KEY(entry, depth));
 CREATE TABLE IF NOT EXISTS expl(id TEXT PRIMARY KEY, phrase TEXT, what TEXT, io TEXT, example TEXT, watch TEXT, hash TEXT, model TEXT, commit_short TEXT, updated TEXT, edited INT DEFAULT 0);
+CREATE TABLE IF NOT EXISTS expl_versions(id TEXT, hash TEXT, json TEXT, PRIMARY KEY(id, hash));
+CREATE TABLE IF NOT EXISTS walk_versions(id TEXT, hash TEXT, json TEXT, PRIMARY KEY(id, hash));
+CREATE TABLE IF NOT EXISTS branch_cache(branch TEXT PRIMARY KEY, commit_json TEXT, files TEXT, updated TEXT);
 CREATE TABLE IF NOT EXISTS layers(id TEXT PRIMARY KEY, name TEXT, description TEXT, ord INT);
 CREATE TABLE IF NOT EXISTS terms(term TEXT PRIMARY KEY, definition TEXT);
 CREATE TABLE IF NOT EXISTS usage(ts TEXT, model TEXT, input_tokens INT, output_tokens INT, cost REAL, note TEXT);
@@ -114,6 +117,12 @@ function rows(db, q, params = []) {
   while (st.step()) out.push(st.getAsObject());
   st.free();
   return out;
+}
+
+// пояснения из прошлых версий: колонка «ветка» и копия в таблицу версий
+function migrateExpl(db) {
+  if (!rows(db, 'PRAGMA table_info(expl)').some((c) => c.name === 'branch')) db.run("ALTER TABLE expl ADD COLUMN branch TEXT DEFAULT ''");
+  for (const r of rows(db, 'SELECT * FROM expl')) db.run('INSERT OR IGNORE INTO expl_versions VALUES (?,?,?)', [r.id, r.hash, JSON.stringify(r)]);
 }
 
 export class Session {
@@ -155,6 +164,7 @@ export class Session {
       db.run("DELETE FROM layers WHERE id NOT IN (SELECT DISTINCT layer FROM files) AND id='new'");
       db.run('COMMIT');
     } catch (e) { db.run('ROLLBACK'); throw e; }
+    this.restoreVersions();
     this.setMeta('web', analysis.web || { routes: [] });
     this.setMeta('roles', analysis.roles || {});
     this.setMeta('source', fetched.source);
@@ -174,10 +184,17 @@ export class Session {
   sites() { return rows(this.db, 'SELECT src, dst, line, kind, ctx, label FROM sites ORDER BY src, line').map((r) => [r.src, r.dst, r.line, r.kind, r.ctx, r.label || '']); }
   entities() { return rows(this.db, 'SELECT json FROM entities').map((r) => JSON.parse(r.json)); }
   flow(id) { const r = rows(this.db, 'SELECT json FROM flows WHERE id=?', [id])[0]; return r ? JSON.parse(r.json) : null; }
-  walks() { return Object.fromEntries(rows(this.db, 'SELECT * FROM walks').map((r) => [r.id, { hash: r.hash, steps: JSON.parse(r.steps || '[]'), model: r.model, updated: r.updated }])); }
+  walks() {
+    // разбор по шагам для нынешней версии кода, если он есть; иначе — последний (с пометкой «код изменился»)
+    const cur = Object.fromEntries(rows(this.db, 'SELECT id, hash FROM items').map((r) => [r.id, r.hash]));
+    const out = Object.fromEntries(rows(this.db, 'SELECT * FROM walks').map((r) => [r.id, { hash: r.hash, steps: JSON.parse(r.steps || '[]'), model: r.model, updated: r.updated }]));
+    for (const v of rows(this.db, 'SELECT id, hash, json FROM walk_versions')) if (cur[v.id] === v.hash) out[v.id] = JSON.parse(v.json);
+    return out;
+  }
   saveWalk(id, steps, model) {
     const it = rows(this.db, 'SELECT hash FROM items WHERE id=?', [id])[0];
     this.db.run('INSERT OR REPLACE INTO walks VALUES (?,?,?,?,?)', [id, it?.hash || '', JSON.stringify(steps), model, now()]);
+    this.db.run('INSERT OR REPLACE INTO walk_versions VALUES (?,?,?)', [id, it?.hash || '', JSON.stringify({ hash: it?.hash || '', steps, model, updated: now() })]);
   }
   stories() {
     return rows(this.db, 'SELECT * FROM stories').map((r) => ({ ...r, texts: JSON.parse(r.texts || '{}') }));
@@ -238,17 +255,48 @@ export class Session {
     const it = rows(this.db, 'SELECT hash FROM items WHERE id=?', [id])[0];
     if (!it) throw new Error('Такой функции нет в текущем коде');
     const c = this.meta('commit') || {};
-    this.db.run('INSERT OR REPLACE INTO expl VALUES (?,?,?,?,?,?,?,?,?,?,?)', [
+    this.db.run('INSERT OR REPLACE INTO expl VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [
       id, entry.phrase || '', entry.what || '', entry.io || '', entry.example || '', entry.watch || '',
-      it.hash, model, c.short || '', now(), edited ? 1 : 0,
+      it.hash, model, c.short || '', now(), edited ? 1 : 0, this.meta('source')?.branch || '',
     ]);
+    this.snapshot(id);
   }
   confirmExplanation(id) {
     const it = rows(this.db, 'SELECT hash FROM items WHERE id=?', [id])[0];
     if (!it) throw new Error('Такой функции нет в текущем коде');
-    this.db.run('UPDATE expl SET hash=?, commit_short=?, updated=? WHERE id=?', [it.hash, this.meta('commit')?.short || '', now(), id]);
+    this.db.run('UPDATE expl SET hash=?, commit_short=?, updated=?, branch=? WHERE id=?', [it.hash, this.meta('commit')?.short || '', now(), this.meta('source')?.branch || '', id]);
+    this.snapshot(id);
   }
-  deleteExplanation(id) { this.db.run('DELETE FROM expl WHERE id=?', [id]); }
+  deleteExplanation(id) { this.db.run('DELETE FROM expl WHERE id=?', [id]); this.db.run('DELETE FROM expl_versions WHERE id=?', [id]); }
+
+  // ---- версии пояснений: у каждой версии кода функции (ветки) — своё пояснение ----
+  snapshot(id) {
+    const r = rows(this.db, 'SELECT * FROM expl WHERE id=?', [id])[0];
+    if (r) this.db.run('INSERT OR REPLACE INTO expl_versions VALUES (?,?,?)', [id, r.hash, JSON.stringify(r)]);
+  }
+  /** После загрузки другой ветки: если для нынешнего кода функции пояснение уже писали — вернуть его. */
+  restoreVersions() {
+    const items = rows(this.db, 'SELECT i.id, i.hash FROM items i LEFT JOIN expl e ON e.id=i.id WHERE e.id IS NULL OR e.hash<>i.hash');
+    for (const it of items) {
+      const v = rows(this.db, 'SELECT json FROM expl_versions WHERE id=? AND hash=?', [it.id, it.hash])[0];
+      if (v) {
+        const r = JSON.parse(v.json);
+        this.db.run('INSERT OR REPLACE INTO expl VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [r.id, r.phrase, r.what, r.io, r.example, r.watch, r.hash, r.model, r.commit_short, r.updated, r.edited || 0, r.branch || '']);
+      }
+    }
+  }
+
+  // ---- скачанные ветки: исходники хранятся, чтобы переключаться без интернета ----
+  cacheBranch(branch, fetched) {
+    this.db.run('INSERT OR REPLACE INTO branch_cache VALUES (?,?,?,?)', [branch, JSON.stringify(fetched.commit), JSON.stringify(fetched.files), now()]);
+    const keep = rows(this.db, 'SELECT branch FROM branch_cache ORDER BY updated DESC').slice(8).map((r) => r.branch); // не больше 8 веток
+    for (const b of keep) this.db.run('DELETE FROM branch_cache WHERE branch=?', [b]);
+  }
+  cachedBranch(branch) {
+    const r = rows(this.db, 'SELECT * FROM branch_cache WHERE branch=?', [branch])[0];
+    return r ? { commit: JSON.parse(r.commit_json), files: JSON.parse(r.files), updated: r.updated } : null;
+  }
+  cachedBranches() { return rows(this.db, 'SELECT branch, commit_json, updated FROM branch_cache').map((r) => ({ name: r.branch, commit: JSON.parse(r.commit_json), updated: r.updated })); }
   setPurpose(file, purpose) { this.db.run('UPDATE files SET purpose=? WHERE path=?', [purpose, file]); }
   addTerms(terms) {
     for (const t of terms || []) {
@@ -295,6 +343,7 @@ export class Sessions {
     const id = `${slug}-${crypto.randomBytes(3).toString('hex')}`;
     const db = new SQLc.Database();
     db.run(SCHEMA);
+    migrateExpl(db);
     const s = new Session(this.fileOf(id), db);
     s.setMeta('version', 1);
     s.setMeta('title', title);
@@ -312,6 +361,7 @@ export class Sessions {
     // разборы до 0.2: у связей не было вида (вызов / передача)
     if (!rows(db, 'PRAGMA table_info(edges)').some((c) => c.name === 'kind')) db.run("ALTER TABLE edges ADD COLUMN kind TEXT DEFAULT 'call'");
     if (!rows(db, 'PRAGMA table_info(sites)').some((c) => c.name === 'label')) db.run("ALTER TABLE sites ADD COLUMN label TEXT DEFAULT ''");
+    migrateExpl(db);
     const s = new Session(file, db);
     this.open.set(id, s);
     return s;

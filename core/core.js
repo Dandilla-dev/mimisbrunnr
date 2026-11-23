@@ -1,7 +1,7 @@
 // Ядро Mímisbrunnr без Electron: настройки, сессии, разбор, пояснения.
 // Electron (electron/main.js) только пробрасывает эти методы в окно.
 import { Settings, Sessions } from './store.js';
-import { fetchTarget, parseTarget } from './fetchRepo.js';
+import { fetchTarget, parseTarget, listGithubBranches, githubHead, localGitInfo } from './fetchRepo.js';
 import { Worker } from 'node:worker_threads';
 import { analyzeSources, layersByFolder } from './analyze.js';
 
@@ -33,8 +33,30 @@ export class MimisCore {
   updateSettings(patch) { return this.settings.update(patch); }
   listSessions() { return this.sessions.list(); }
 
-  async _load(target, onProgress) {
-    const fetched = await fetchTarget(target, { fetchFn: this.fetchFn, token: this.settings.githubToken(), onProgress });
+  // s — разбор, у которого есть сохранённые ветки: если эта версия ветки уже скачана, качать заново не нужно,
+  // а без интернета можно открыть сохранённую копию
+  async _load(target0, onProgress, s = null) {
+    let target = typeof target0 === 'string' ? parseTarget(target0) : target0;
+    const opts = { fetchFn: this.fetchFn, token: this.settings.githubToken() };
+    let fetched = null;
+    if (target.type === 'github' && s) {
+      let head = null;
+      try { head = await githubHead(target, opts); } catch (e) {
+        const c = target.branch && s.cachedBranch(target.branch);
+        if (!c) throw e;
+        onProgress('GitHub сейчас недоступен — открываю сохранённую копию ветки.');
+        fetched = { source: { ...s.meta('source'), branch: target.branch }, commit: c.commit, files: c.files, offline: true };
+      }
+      if (head) {
+        const c = s.cachedBranch(head.branch);
+        if (c && c.commit.hash === head.sha) {
+          onProgress('Эта версия ветки уже скачана — беру сохранённую копию.');
+          fetched = { source: { ...s.meta('source'), branch: head.branch }, commit: c.commit, files: c.files };
+        } else target = { ...target, branch: head.branch };
+      }
+    }
+    if (!fetched) fetched = await fetchTarget(target, { ...opts, onProgress });
+    if (s && fetched.source.type === 'github' && fetched.source.branch && !fetched.offline) s.cacheBranch(fetched.source.branch, fetched);
     if (!fetched.files.length) throw new Error('Не нашёл в репозитории файлов Python или JavaScript/TypeScript.');
     onProgress(`Разбираю ${fetched.files.length} файлов…`);
     const t0 = Date.now();
@@ -48,37 +70,79 @@ export class MimisCore {
     return { fetched, analysis };
   }
 
-  async createSession(input, onProgress = () => {}) {
-    parseTarget(input); // понятная ошибка раньше, чем сеть
-    const { fetched, analysis } = await this._load(input, onProgress);
+  async createSession(input, onProgress = () => {}, branch = null) {
+    const target = parseTarget(input); // понятная ошибка раньше, чем сеть
+    if (branch && target.type === 'github') target.branch = branch;
+    const { fetched, analysis } = await this._load(target, onProgress);
     const s = await this.sessions.create(fetched.source.label);
     s.writeAnalysis(fetched, analysis, layersByFolder(Object.keys(analysis.files)), 'folders');
+    if (fetched.source.type === 'github' && fetched.source.branch) s.cacheBranch(fetched.source.branch, fetched);
     s.save();
     onProgress('Готово.');
     return s.view();
   }
 
-  async updateSession(id, onProgress = () => {}) {
+  async updateSession(id, onProgress = () => {}, branch = undefined) {
     if (this.jobs.has(id)) throw new Error('Сейчас идёт объяснение — дождитесь окончания или остановите его.');
     const s = await this.sessions.get(id);
     const src = s.meta('source');
-    const target = src.type === 'local' ? { type: 'local', path: src.path } : { type: 'github', owner: src.owner, repo: src.repo, branch: src.branch || null };
+    const switching = branch !== undefined && branch !== src.branch;
+    if (switching && src.type !== 'github') throw new Error('Ветку папки на компьютере переключают в git. После этого нажми «Обновить код».');
+    const target = src.type === 'local' ? { type: 'local', path: src.path } : { type: 'github', owner: src.owner, repo: src.repo, branch: (switching ? branch : src.branch) || null };
     const before = Object.fromEntries(s.items().map((i) => [i.id, i.hash]));
     const oldCommit = s.meta('commit');
-    const { fetched, analysis } = await this._load(target, onProgress);
+    const { fetched, analysis } = await this._load(target, onProgress, s);
     const byFolder = s.meta('layers_source', 'folders') === 'folders';
     s.writeAnalysis(fetched, analysis, byFolder ? layersByFolder(Object.keys(analysis.files)) : null, null);
     const after = Object.fromEntries(analysis.items.map((i) => [i.id, i.hash]));
     const diff = {
       at: new Date().toISOString().slice(0, 16).replace('T', ' '),
       from: oldCommit?.short, to: fetched.commit.short,
+      fromBranch: src.branch || '', toBranch: fetched.source.branch || '', offline: Boolean(fetched.offline),
+      restored: 0,
       changed: Object.keys(after).filter((k) => before[k] && before[k] !== after[k]).length,
       added: Object.keys(after).filter((k) => !before[k]).length,
       removed: Object.keys(before).filter((k) => !after[k]).length,
     };
+    // сколько пояснений нашлось для кода этой ветки (написанных раньше — в этой или другой ветке)
+    const fresh = s.view().items.filter((i) => i.status === 'fresh').length;
+    diff.restored = fresh;
     s.setMeta('last_update', diff);
     s.save();
     return s.view();
+  }
+
+  // ---- ветки ----
+  /** Ветки репозитория разбора. refresh — спросить GitHub заново. */
+  async branches(id, refresh = false) {
+    const s = await this.sessions.get(id);
+    const src = s.meta('source');
+    const cached = Object.fromEntries(s.cachedBranches().map((b) => [b.name, b]));
+    if (src.type === 'local') {
+      const g = localGitInfo(src.path);
+      return { type: 'local', current: g?.current || src.branch || '', list: (g?.branches || []).map((name) => ({ name })), remote: g?.remote || null, git: Boolean(g) };
+    }
+    let meta = s.meta('branches', null);
+    let error = '';
+    if (refresh || !meta || Date.now() - (meta.fetched || 0) > 10 * 60_000) {
+      try {
+        const r = await listGithubBranches(src, { fetchFn: this.fetchFn, token: this.settings.githubToken() });
+        meta = { default: r.default, list: r.branches, fetched: Date.now() };
+        s.setMeta('branches', meta); s.save();
+      } catch (e) { error = e.message; }
+    }
+    const list = (meta?.list || [{ name: src.branch, sha: '' }]).map((b) => ({ ...b, cached: Boolean(cached[b.name]), cachedCommit: cached[b.name]?.commit || null, stale: Boolean(cached[b.name] && b.sha && cached[b.name].commit.hash !== b.sha) }));
+    for (const name of Object.keys(cached)) if (!list.some((b) => b.name === name)) list.push({ name, sha: '', cached: true, cachedCommit: cached[name].commit, gone: Boolean(meta) });
+    return { type: 'github', current: src.branch || meta?.default || '', default: meta?.default || '', list, fetched: meta?.fetched || 0, error };
+  }
+  /** Переключить разбор на другую ветку. Пояснения к одинаковому коду сохраняются. */
+  async switchBranch(id, branch, onProgress = () => {}) { return this.updateSession(id, onProgress, branch); }
+  /** Ветки до создания разбора — для выбора при загрузке. */
+  async peekBranches(input) {
+    const t = parseTarget(input);
+    if (t.type === 'local') { const g = localGitInfo(t.path); return { type: 'local', current: g?.current || '', list: (g?.branches || []).map((name) => ({ name })), remote: g?.remote || null }; }
+    const r = await listGithubBranches(t, { fetchFn: this.fetchFn, token: this.settings.githubToken() });
+    return { type: 'github', default: r.default, current: t.branch || r.default, list: r.branches };
   }
 
   async view(id) { return (await this.sessions.get(id)).view(); }

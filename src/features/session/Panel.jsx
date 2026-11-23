@@ -286,7 +286,9 @@ function FnView({ view, ix, id, onExplain }) {
         <div className="min-w-0">
           {it.status === 'stale' && !editing && (
             <div className="rounded-xl bg-bronze-dim border border-bronze/30 px-4 py-3 mb-4 text-[13px] leading-relaxed">
-              <b>Код изменился</b> после того, как написано это пояснение (коммит {expl.commit_short || '?'}, сейчас {view.commit?.short}). Проверь текст по коду.
+              {expl.branch && view.source?.branch && expl.branch !== view.source.branch
+                ? <><b>Пояснение написано для другой версии кода</b> — из ветки <span className="font-mono">{expl.branch}</span> (коммит {expl.commit_short || '?'}). В открытой ветке <span className="font-mono">{view.source.branch}</span> эта функция выглядит иначе, поэтому текст может не совпадать с кодом. Можно объяснить заново — пояснение для ветки {expl.branch} при этом сохранится.</>
+                : <><b>Код изменился</b> после того, как написано это пояснение (коммит {expl.commit_short || '?'}, сейчас {view.commit?.short}). Проверь текст по коду.</>}
               <div className="flex flex-wrap gap-2 mt-2.5">
                 <button className="btn" onClick={confirm}>Пояснение всё ещё верно</button>
                 <button className="btn" onClick={() => setEditing(true)}>Исправить вручную</button>

@@ -115,7 +115,10 @@ app.whenReady().then(() => {
   log(`start ${app.getVersion()} · ${process.platform} · ${process.env.XDG_SESSION_TYPE || ''} ${process.env.XDG_CURRENT_DESKTOP || ''} · gpu ${gpuOff ? 'off' : 'on'}`);
   handle('settings:update', (patch) => core.updateSettings(patch));
   handle('sessions:list', () => core.listSessions());
-  handle('sessions:create', (input) => core.createSession(input, (m) => send('progress', { kind: 'load', message: m })));
+  handle('sessions:create', (input, branch) => core.createSession(input, (m) => send('progress', { kind: 'load', message: m }), branch || null));
+  handle('branches:list', (id, refresh) => core.branches(id, refresh));
+  handle('branches:switch', (id, branch) => core.switchBranch(id, branch, (m) => send('progress', { kind: 'load', message: m })));
+  handle('branches:peek', (input) => core.peekBranches(input));
   handle('sessions:update', (id) => core.updateSession(id, (m) => send('progress', { kind: 'load', message: m })));
   handle('sessions:view', (id) => core.view(id));
   handle('sessions:code', (id, file) => core.code(id, file));

@@ -54,6 +54,71 @@ async function getJson(fetchFn, url, token) {
   return r.json();
 }
 
+/** Список веток репозитория GitHub: { default, branches: [{ name, sha }] }. */
+export async function listGithubBranches(target, { fetchFn = fetch, token } = {}) {
+  const { owner, repo } = target;
+  const info = await getJson(fetchFn, `${API()}/repos/${owner}/${repo}`, token);
+  const branches = [];
+  for (let page = 1; page <= 5; page++) {
+    const list = await getJson(fetchFn, `${API()}/repos/${owner}/${repo}/branches?per_page=100&page=${page}`, token);
+    if (!Array.isArray(list) || !list.length) break;
+    for (const b of list) branches.push({ name: b.name, sha: b.commit?.sha || '' });
+    if (list.length < 100) break;
+  }
+  branches.sort((a, b) => (a.name === info.default_branch ? -1 : b.name === info.default_branch ? 1 : a.name.localeCompare(b.name)));
+  return { default: info.default_branch, branches };
+}
+
+/** Последний коммит ветки (без скачивания кода) — чтобы понять, нужно ли качать заново. */
+export async function githubHead(target, { fetchFn = fetch, token } = {}) {
+  const { owner, repo } = target;
+  let branch = target.branch;
+  if (!branch) branch = (await getJson(fetchFn, `${API()}/repos/${owner}/${repo}`, token)).default_branch;
+  const c = await getJson(fetchFn, `${API()}/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`, token);
+  return { branch, sha: c.sha };
+}
+
+/**
+ * Ветки git в папке на компьютере — только чтение файлов .git, git не запускается.
+ * { current, branches: [имена], remote: { owner, repo } | null }
+ */
+export function localGitInfo(root) {
+  try {
+    let gitDir = path.join(root, '.git');
+    if (fs.statSync(gitDir).isFile()) { // worktree / submodule: «gitdir: …»
+      const m = fs.readFileSync(gitDir, 'utf8').match(/gitdir:\s*(.+)/);
+      if (!m) return null;
+      gitDir = path.resolve(root, m[1].trim());
+    }
+    const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+    const current = head.startsWith('ref: refs/heads/') ? head.slice('ref: refs/heads/'.length) : null;
+    const names = new Set();
+    (function walkRefs(dir, prefix) {
+      let list = [];
+      try { list = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of list) {
+        if (e.isDirectory()) walkRefs(path.join(dir, e.name), `${prefix}${e.name}/`);
+        else names.add(prefix + e.name);
+      }
+    })(path.join(gitDir, 'refs', 'heads'), '');
+    try {
+      for (const l of fs.readFileSync(path.join(gitDir, 'packed-refs'), 'utf8').split('\n')) {
+        const m = l.match(/^[0-9a-f]{40} refs\/heads\/(.+)$/);
+        if (m) names.add(m[1]);
+      }
+    } catch { /* нет packed-refs */ }
+    let remote = null;
+    try {
+      const cfg = fs.readFileSync(path.join(gitDir, 'config'), 'utf8');
+      const m = cfg.match(/\[remote "origin"\][^[]*?url\s*=\s*(\S+)/);
+      const t = m && parseTargetSafe(m[1]);
+      if (t?.type === 'github') remote = { owner: t.owner, repo: t.repo };
+    } catch { /* нет config */ }
+    return { current, branches: [...names].sort(), remote };
+  } catch { return null; }
+}
+const parseTargetSafe = (s) => { try { return parseTarget(s); } catch { return null; } };
+
 export async function fetchGithub(target, { fetchFn = fetch, token, onProgress = () => {} } = {}) {
   const { owner, repo } = target;
   onProgress('Спрашиваю GitHub о репозитории…');
@@ -134,7 +199,7 @@ export async function fetchLocal(target, { onProgress = () => {} } = {}) {
   const h = hash.digest('hex');
   const now = new Date();
   return {
-    source: { type: 'local', path: root, label: path.basename(root) },
+    source: { type: 'local', path: root, label: path.basename(root), branch: localGitInfo(root)?.current || '' },
     commit: { hash: h, short: h.slice(0, 7), date: now.toISOString().slice(0, 16).replace('T', ' '), subject: 'папка на этом компьютере' },
     files,
   };
