@@ -147,6 +147,19 @@ app.whenReady().then(() => {
     const r = await dialog.showOpenDialog(win, { title: 'Папка с кодом', properties: ['openDirectory'] });
     return r.canceled ? null : r.filePaths[0];
   });
+  // схема картинкой: png приходит как base64, svg — текстом
+  handle('image:save', async (name, ext, data) => {
+    const safe = String(name || 'схема').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80);
+    let file;
+    if (process.env.MIMIS_SAVE_DIR) file = path.join(process.env.MIMIS_SAVE_DIR, `${safe}.${ext}`);
+    else {
+      const r = await dialog.showSaveDialog(win, { title: 'Сохранить схему', defaultPath: path.join(app.getPath('pictures'), `${safe}.${ext}`), filters: [ext === 'png' ? { name: 'Картинка PNG', extensions: ['png'] } : { name: 'Векторная картинка SVG', extensions: ['svg'] }] });
+      if (r.canceled || !r.filePath) return null;
+      file = r.filePath;
+    }
+    fs.writeFileSync(file, ext === 'png' ? Buffer.from(String(data), 'base64') : String(data));
+    return file;
+  });
   handle('open:external', (url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
 
   createWindow();

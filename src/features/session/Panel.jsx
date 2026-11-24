@@ -13,7 +13,7 @@ import ErrorBoundary from '../../components/ErrorBoundary';
 import { linkOf } from './linkKinds';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
-import { ProjectDiagram, LayerDiagram, FnDiagram } from './Diagrams';
+import { ProjectDiagram, LayerDiagram, FnDiagram, RequestDiagram } from './Diagrams';
 
 export const Badge = ({ status }) => status === 'fresh'
   ? <span className="font-mono text-[10px] text-moss">● разбор</span>
@@ -91,6 +91,13 @@ function Overview({ view, ix, onExplain }) {
         <div className="font-display font-semibold text-[16px] mb-2.5">Схема взаимодействия</div>
         <ProjectDiagram view={view} ix={ix} />
       </div>
+      {(view.web?.routes || []).length > 0 && (
+        <div className="mt-8">
+          <div className="font-display font-semibold text-[16px] mb-1">Как проходят запросы</div>
+          <p className="text-[13px] text-mist mb-2.5 leading-relaxed">Это веб-приложение: к нему приходят запросы (адрес + метод). Здесь все маршруты сразу, разложенные по ролям — от входа до базы данных.</p>
+          <RequestDiagram view={view} ix={ix} />
+        </div>
+      )}
 
       {lu && (
         <div className="card px-4 py-3 mt-5 text-[13px]">

@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('mimis', {
   logError: (text) => ipcRenderer.send('log:error', String(text).slice(0, 20000)),
   setGpu: (on) => call('gpu:set', on),
   pickFolder: () => call('dialog:folder'),
+  saveImage: (name, ext, data) => call('image:save', name, ext, data),
   openExternal: (url) => call('open:external', url),
   onProgress: (fn) => on('progress', fn),
   onExplain: (fn) => on('explain', fn),

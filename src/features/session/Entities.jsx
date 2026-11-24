@@ -143,7 +143,7 @@ export function EntitiesView({ view, ix }) {
       {nodes.length > 0 && (
         <section className="mt-5">
           <h2 className="font-display font-semibold text-[16px] mb-2">Схема связей</h2>
-          <Graph nodes={nodes} edges={edges} height={nodes.length > 8 ? 480 : 340} onNodeClick={(n) => dispatch(go({ t: 'fn', id: n.id }))} emptyText="Связей нет." />
+          <Graph nodes={nodes} edges={edges} legend={false} name="сущности и связи" height={nodes.length > 8 ? 480 : 340} onNodeClick={(n) => dispatch(go({ t: 'fn', id: n.id }))} emptyText="Связей нет." />
           <div className="text-[12px] text-mist-dim mt-2">1 — N: у одной записи слева много записей справа. N — N (пунктир): многие-ко-многим, обычно через отдельную таблицу-связку.</div>
         </section>
       )}

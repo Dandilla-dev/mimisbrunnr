@@ -10,6 +10,7 @@ import { useCode } from './useCode';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
 import { linkOf } from './linkKinds';
+import Sequence from './Sequence';
 
 const DEPTHS = [2, 3, 4, 6];
 // цвет роли шага на пути запроса
@@ -179,6 +180,8 @@ export function ScenarioView({ view, ix, id, method }) {
   const fresh = story && story.hash === sc.hash;
   const [cur, setCur] = useState(1);
   const [where, setWhere] = useState(false);
+  const [mode, setModeState] = useState(() => { try { return localStorage.getItem('mimis.scenarioMode') || 'list'; } catch { return 'list'; } });
+  const setMode = (m) => { setModeState(m); try { localStorage.setItem('mimis.scenarioMode', m); } catch { /* */ } };
   useEffect(() => { setCur(1); }, [id, depth]);
   useEffect(() => { setWhere(false); }, [cur]);
   const step = sc.steps[cur - 1] || sc.steps[0];
@@ -223,6 +226,11 @@ export function ScenarioView({ view, ix, id, method }) {
           <button key={d} onClick={() => setDepth(d)} className={`px-2.5 py-1 rounded-md text-[12px] border ${depth === d ? 'border-bronze text-bronze' : 'border-hairline text-mist hover:text-stone'}`}>{d}</button>
         ))}
         <span className="text-[12px] text-mist-dim ml-1">{sc.steps.length} {plural(sc.steps.length, 'шаг', 'шага', 'шагов')}</span>
+        <div className="flex rounded-lg border border-hairline overflow-hidden text-[12px] ml-3">
+          {[['list', 'Список шагов'], ['seq', 'Диаграмма последовательности']].map(([m, t]) => (
+            <button key={m} className={`px-2.5 py-1 ${mode === m ? 'bg-panel-2 text-bronze' : 'text-mist hover:text-stone'}`} onClick={() => setMode(m)}>{t}</button>
+          ))}
+        </div>
         <div className="flex-1" />
         <StoryButton view={view} id={id} depth={depth} story={story} fresh={fresh} />
       </div>
@@ -244,10 +252,13 @@ export function ScenarioView({ view, ix, id, method }) {
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(280px,0.8fr)_minmax(0,1.2fr)] gap-6 mt-5 items-start">
-        <div className="card p-1.5 max-h-[72vh] overflow-y-auto scroll-thin xl:sticky xl:top-0">
-          {sc.steps.map((s) => <StepRow key={s.n} step={s} it={ix.itemById[s.id]} active={s.n === step.n} onClick={() => setCur(s.n)} story={story?.texts?.[s.n]} />)}
-        </div>
+      {mode === 'seq' && <div className="mt-5"><Sequence sc={sc} ix={ix} cur={step.n} onPick={setCur} name={route ? `${route.method} ${route.path}` : entry.name} /></div>}
+      <div className={`grid grid-cols-1 gap-6 mt-5 items-start ${mode === 'seq' ? '' : 'xl:grid-cols-[minmax(280px,0.8fr)_minmax(0,1.2fr)]'}`}>
+        {mode === 'list' && (
+          <div className="card p-1.5 max-h-[72vh] overflow-y-auto scroll-thin xl:sticky xl:top-0">
+            {sc.steps.map((s) => <StepRow key={s.n} step={s} it={ix.itemById[s.id]} active={s.n === step.n} onClick={() => setCur(s.n)} story={story?.texts?.[s.n]} />)}
+          </div>
+        )}
 
         <div className="min-w-0">
           <div className="flex items-center gap-2">
