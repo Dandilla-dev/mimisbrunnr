@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { go, back, home, reloadSession, toast } from '../../app/store';
 import CodeView from '../../components/CodeView';
-import { BackIcon, SparkIcon, CodeIcon, PathIcon } from '../../components/icons';
+import { BackIcon, SparkIcon, CodeIcon, PathIcon, PlayIcon } from '../../components/icons';
 import { ScenarioList, ScenarioView } from './Scenarios';
 import { useCode } from './useCode';
 import Inside from './Inside';
@@ -14,6 +14,7 @@ import { linkOf } from './linkKinds';
 import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
 import { ProjectDiagram, LayerDiagram, FnDiagram, RequestDiagram } from './Diagrams';
+import StartView from './Start';
 
 export const Badge = ({ status }) => status === 'fresh'
   ? <span className="font-mono text-[10px] text-moss">● разбор</span>
@@ -48,7 +49,7 @@ function Crumbs({ view, ix }) {
     ? <button key={`p${parts.length}`} className="hover:text-stone truncate max-w-[260px]" onClick={() => dispatch(go(v))}>{label}</button>
     : <span key={`p${parts.length}`} className="text-stone truncate max-w-[300px]">{label}</span>);
   if (top.t === 'layer') add(layerName(top.id));
-  if (top.t === 'file') { add(layerName(ix.fileByPath[top.file]?.layer), { t: 'layer', id: ix.fileByPath[top.file]?.layer }); add(top.file); }
+  if (top.t === 'file') { add(layerName(ix.fileByPath[top.file]?.layer), { t: 'layer', id: ix.fileByPath[top.file]?.layer }); add(top.line ? `${top.file}:${top.line}` : top.file); }
   if (top.t === 'fn') {
     const it = ix.itemById[top.id];
     const lay = ix.fileByPath[it.file]?.layer;
@@ -61,12 +62,30 @@ function Crumbs({ view, ix }) {
     add('Сценарии', { t: 'scenarios' }); add(r ? `${r.method} ${r.path}` : ix.itemById[top.id]?.name || '');
   }
   if (top.t === 'todo') add('Требует внимания');
+  if (top.t === 'start') add('С чего начать');
   if (top.t === 'terms') add('Словарь');
   return (
     <div className="flex items-center gap-3 mb-5 text-[12.5px] text-mist">
       <button className="btn-ghost -ml-2 border border-hairline" disabled={stack.length < 2} onClick={() => dispatch(back())}><BackIcon className="w-3.5 h-3.5" />Назад</button>
       <div className="flex items-center gap-2 min-w-0 flex-wrap">{parts}</div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- с чего начать (кратко, в обзоре)
+function StartCard({ view, ix }) {
+  const dispatch = useDispatch();
+  const list = (view.entries || []).filter((e) => ix.fileByPath[e.file]);
+  if (!list.length) return null;
+  const e = list[0];
+  return (
+    <button onClick={() => dispatch(go({ t: 'start' }))} className="mt-5 w-full text-left card px-4 py-3.5 border-bronze/40 hover:border-bronze transition-colors flex items-start gap-3">
+      <PlayIcon className="w-6 h-6 text-bronze flex-shrink-0 mt-0.5" />
+      <span className="min-w-0">
+        <span className="block text-[14px]"><b className="font-medium">С чего начать разбор:</b> {e.title.toLowerCase()} — <span className="font-mono text-[13px] text-bronze">{e.file}:{e.line}</span></span>
+        <span className="block text-[12.5px] text-mist mt-0.5">{e.reasons[0]}{list.length > 1 ? ` · ещё точек запуска: ${list.length - 1}` : ''}</span>
+      </span>
+    </button>
   );
 }
 
@@ -87,6 +106,7 @@ function Overview({ view, ix, onExplain }) {
         ? <p className="text-[14.5px] leading-relaxed mt-5 text-stone">{view.summary}</p>
         : <p className="text-[14px] leading-relaxed mt-5 text-mist">Пока я разложил файлы по папкам. Когда ты запустишь объяснение, я опишу проект целиком и разложу его по смысловым слоям.</p>}
 
+      <StartCard view={view} ix={ix} />
       <div className="mt-6">
         <div className="font-display font-semibold text-[16px] mb-2.5">Схема взаимодействия</div>
         <ProjectDiagram view={view} ix={ix} />
@@ -159,11 +179,12 @@ function LayerView({ view, ix, id }) {
 }
 
 // ---------------------------------------------------------------- файл
-function FileView({ view, ix, file, onExplain }) {
+function FileView({ view, ix, file, line, onExplain }) {
   const dispatch = useDispatch();
   const f = ix.fileByPath[file];
   const items = ix.itemsByFile[file] || [];
-  const [tab, setTab] = useState(items.length ? 'fns' : 'code');
+  const [tab, setTab] = useState(items.length && !line ? 'fns' : 'code');
+  const entry = (view.entries || []).find((e) => e.file === file);
   const code = useCode(view, file);
   const nf = items.filter((i) => i.status !== 'fresh').length;
   return (
@@ -172,6 +193,12 @@ function FileView({ view, ix, file, onExplain }) {
       <h1 className="font-mono text-[18px] break-all">{file}</h1>
       <p className="text-[14px] text-mist mt-2 leading-relaxed max-w-[760px]">{f.purpose || f.doc || 'Назначение файла ещё не описано.'}</p>
       {f.error && <div className="text-danger-soft text-[13px] mt-2">{f.error}</div>}
+      {entry && (
+        <button onClick={() => dispatch(go({ t: 'start' }))} className="mt-3 flex items-center gap-2 rounded-xl border border-bronze/40 bg-bronze-dim px-3.5 py-2 text-[13px] text-left hover:border-bronze">
+          <PlayIcon className="w-4 h-4 text-bronze flex-shrink-0" />
+          <span><b className="font-medium">Отсюда программа начинает работать</b> — {entry.title.toLowerCase()}, строка {entry.line}. Подробнее →</span>
+        </button>
+      )}
       <div className="flex items-center gap-2 mt-5 mb-4">
         <div className="flex bg-panel-2 border border-hairline rounded-xl p-1">
           {[['fns', `Функции (${items.length})`], ['code', 'Весь код']].map(([k, label]) => (
@@ -197,7 +224,7 @@ function FileView({ view, ix, file, onExplain }) {
           ))}
         </div>
       ) : code === null ? <div className="text-mist text-[13px]">Загружаю код…</div> : (
-        <CodeView code={code} lang={f.lang} maxHeight="calc(100vh - 290px)" />
+        <CodeView code={code} lang={f.lang} maxHeight="calc(100vh - 290px)" {...(line ? { focus: line, mark: [line, line] } : {})} />
       )}
     </div>
   );
@@ -396,11 +423,12 @@ export default function Panel({ view, ix, onExplain }) {
   const top = useSelector((s) => s.session.stack[s.session.stack.length - 1]);
   let body;
   if (top.t === 'layer') body = <LayerView view={view} ix={ix} id={top.id} />;
-  else if (top.t === 'file' && ix.fileByPath[top.file]) body = <FileView key={top.file} view={view} ix={ix} file={top.file} onExplain={onExplain} />;
+  else if (top.t === 'file' && ix.fileByPath[top.file]) body = <FileView key={`${top.file}:${top.line || ''}`} view={view} ix={ix} file={top.file} line={top.line} onExplain={onExplain} />;
   else if (top.t === 'fn' && ix.itemById[top.id]) body = <FnView view={view} ix={ix} id={top.id} onExplain={onExplain} />;
   else if (top.t === 'entities') body = <EntitiesView view={view} ix={ix} />;
   else if (top.t === 'scenarios') body = <ScenarioList view={view} ix={ix} />;
   else if (top.t === 'scenario' && ix.itemById[top.id]) body = <ScenarioView key={`${top.id}:${top.method || ''}`} view={view} ix={ix} id={top.id} method={top.method} />;
+  else if (top.t === 'start') body = <StartView view={view} ix={ix} />;
   else if (top.t === 'todo') body = <Todo view={view} ix={ix} />;
   else if (top.t === 'terms') body = <Terms view={view} />;
   else body = <Overview view={view} ix={ix} onExplain={onExplain} />;

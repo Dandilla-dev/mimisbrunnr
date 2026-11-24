@@ -45,6 +45,7 @@ export function ProjectDiagram({ view, ix }) {
   const dispatch = useDispatch();
   const [sel, setSel] = useState(null);
   const { nodes, edges } = useMemo(() => {
+    const startLayers = new Set((view.entries || []).slice(0, 3).map((e) => ix.fileByPath[e.file]?.layer).filter(Boolean));
     const agg = {};
     const inside = {};
     for (const [a, b] of view.edges) {
@@ -55,7 +56,7 @@ export function ProjectDiagram({ view, ix }) {
     }
     const ns = view.layers.map((l) => {
       const st = ix.layerStats[l.id] || { files: 0, items: 0 };
-      return { id: l.id, label: l.name, sub: `${st.files} файл. · ${st.items} функц. · внутри ${inside[l.id] || 0} св.`, note: l.description || '', color: layerColor(view, l.id), title: l.description || l.name };
+      return { id: l.id, label: l.name, start: startLayers.has(l.id), sub: `${st.files} файл. · ${st.items} функц. · внутри ${inside[l.id] || 0} св.`, note: l.description || '', color: layerColor(view, l.id), title: l.description || l.name };
     });
     const es = Object.entries(agg).map(([k, pairs]) => {
       const [s, t] = k.split('\u0000');
@@ -123,8 +124,9 @@ export function LayerDiagram({ view, ix, layerId }) {
     if (!all) for (const k of Object.keys(agg)) if (hubSet.has(k.split('\u0000')[1])) delete agg[k];
     const used = new Set();
     Object.keys(agg).forEach((k) => k.split('\u0000').forEach((x) => used.add(x)));
+    const starts = new Set((view.entries || []).map((e) => e.file));
     const ns = files.map((f) => ({
-      id: `f:${f}`, label: f.slice(prefix.length),
+      id: `f:${f}`, label: f.slice(prefix.length), start: starts.has(f),
       sub: hubSet.has(`f:${f}`) && !all ? `общий · используют ${usersOf[`f:${f}`].size} файлов` : `${(ix.itemsByFile[f] || []).length} функц. · ${ix.fileByPath[f].lines} стр.`,
       note: ix.fileByPath[f].purpose || '',
       color: layerColor(view, layerId), mono: true, title: ix.fileByPath[f].purpose || f,
@@ -175,7 +177,7 @@ export function hubsOf(view, ix) {
 }
 const fnNode = (view, ix, x, extra = {}) => {
   const it = ix.itemById[x];
-  return { id: x, label: it.name, sub: `${it.file.split('/').pop()}:${it.line}`, note: it.phrase || '', mono: true, color: layerColor(view, ix.fileByPath[it.file]?.layer), title: it.phrase || it.name, ...extra };
+  return { id: x, start: (view.entries || []).some((e) => e.fn === x), label: it.name, sub: `${it.file.split('/').pop()}:${it.line}`, note: it.phrase || '', mono: true, color: layerColor(view, ix.fileByPath[it.file]?.layer), title: it.phrase || it.name, ...extra };
 };
 const kindLabel = (k) => (k === 'guess' ? '?' : k === 'dispatch' ? 'или' : undefined);
 

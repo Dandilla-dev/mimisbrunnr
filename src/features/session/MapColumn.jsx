@@ -1,7 +1,7 @@
 // Левая колонка: схема проекта — слои, у каждого файлы и функции.
 import { useDispatch, useSelector } from 'react-redux';
 import { go, home } from '../../app/store';
-import { AlertIcon, BookIcon, PathIcon, ScrollIcon, TableIcon } from '../../components/icons';
+import { AlertIcon, BookIcon, PathIcon, PlayIcon, ScrollIcon, TableIcon } from '../../components/icons';
 
 const LAYER_COLORS = ['#B98D55', '#5C82A6', '#7FA08A', '#C9A7D9', '#D98787', '#A9C2D8', '#C8B27A', '#8FB59A', '#9AA5C9', '#D6A57A'];
 
@@ -15,6 +15,7 @@ export default function MapColumn({ view, ix }) {
   const top = useSelector((s) => s.session.stack[s.session.stack.length - 1]);
   const activeLayer = top.t === 'layer' ? top.id : top.t === 'file' ? ix.fileByPath[top.file]?.layer : top.t === 'fn' || top.t === 'scenario' ? ix.fileByPath[ix.itemById[top.id]?.file]?.layer : null;
   const attention = view.counts.stale + view.counts.none + view.orphans.length;
+  const startLayers = new Set((view.entries || []).slice(0, 3).map((e) => ix.fileByPath[e.file]?.layer).filter(Boolean));
 
   const navBtn = (active, onClick, Icon, label, extra) => (
     <button onClick={onClick} className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-[13px] transition-colors ${active ? 'bg-panel-2 text-bronze' : 'text-mist hover:bg-panel-2 hover:text-stone'}`}>
@@ -26,6 +27,7 @@ export default function MapColumn({ view, ix }) {
     <aside className="w-[300px] flex-shrink-0 border-r border-hairline-soft overflow-y-auto scroll-thin px-3.5 py-4">
       <div className="flex flex-col gap-0.5 mb-5">
         {navBtn(top.t === 'overview', () => dispatch(home()), ScrollIcon, 'Обзор проекта')}
+        {(view.entries === null || view.entries?.length > 0) && navBtn(top.t === 'start', () => dispatch(go({ t: 'start' })), PlayIcon, 'С чего начать', view.entries?.length ? <span className="text-[10px] text-bronze">▶</span> : null)}
         {navBtn(top.t === 'scenarios' || top.t === 'scenario', () => dispatch(go({ t: 'scenarios' })), PathIcon, view.web?.routes?.length ? 'Сценарии и запросы' : 'Сценарии', view.web?.routes?.length ? <span className="font-mono text-[10.5px] text-mist-dim">{view.web.routes.length}</span> : null)}
         {view.entities?.length > 0 && navBtn(top.t === 'entities', () => dispatch(go({ t: 'entities' })), TableIcon, 'Сущности', <span className="font-mono text-[10.5px] text-mist-dim">{view.entities.length}</span>)}
         {navBtn(top.t === 'todo', () => dispatch(go({ t: 'todo' })), AlertIcon, 'Требует внимания', attention ? <span className="font-mono text-[10.5px] text-bronze">{attention}</span> : null)}
@@ -45,7 +47,7 @@ export default function MapColumn({ view, ix }) {
               className={`text-left rounded-xl border px-3.5 py-3 transition-colors ${activeLayer === l.id ? 'bg-panel-2 border-hairline' : 'bg-panel border-hairline-soft hover:border-hairline'}`}
               style={{ borderLeft: `4px solid ${layerColor(view, l.id)}` }}
             >
-              <div className="font-display font-semibold text-[14.5px] leading-snug">{l.name}</div>
+              <div className="font-display font-semibold text-[14.5px] leading-snug flex items-center gap-1.5">{l.name}{startLayers.has(l.id) && <span className="text-[9.5px] font-mono uppercase tracking-wide text-bronze border border-bronze/50 rounded px-1 py-[1px]" title="Здесь программа начинает работать">▶ старт</span>}</div>
               {l.description && <div className="text-[11.5px] text-mist leading-snug mt-1 line-clamp-2">{l.description}</div>}
               <div className="flex items-center justify-between mt-2">
                 <span className="font-mono text-[10.5px] text-mist-dim">{st.files} файл. · {st.items} функц.</span>

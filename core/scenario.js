@@ -30,7 +30,10 @@ export function entryPoints(view) {
   };
   const items = view.items.filter((it) => it.kind !== 'class' && it.kind !== 'entity');
   const routeIds = new Set((view.web?.routes || []).map((r) => r.id));
+  const entryFns = (view.entries || []).map((e) => e.fn).filter((id) => id && view.items.some((i) => i.id === id));
   const groups = [
+    group('Запуск программы', 'Отсюда программа начинает работать — хорошее начало разбора.',
+      entryFns.map((id) => view.items.find((i) => i.id === id))),
     group('Маршруты API', 'Сюда приходят запросы извне: адрес и метод HTTP. Сценарий пройдёт весь путь запроса: промежуточные обработчики, проверки, обработчик, база, ответ и ошибки.',
       items.filter((it) => routeIds.has(it.id) || it.kind === 'route' || it.route)),
     group('Действия в интерфейсе', 'Обработчики: что происходит, когда пользователь нажимает, вводит, отправляет.',

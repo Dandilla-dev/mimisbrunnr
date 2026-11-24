@@ -515,6 +515,26 @@ try {
   assert.ok(flr.errors.some((x) => x.label === '404'));
   step('Flask: blueprint с префиксом, before_request, login_required, errorhandler');
 
+  // с чего начинается программа
+  const at = (v) => v.entries.map((e) => `${e.kind} ${e.file}:${e.line}${e.fn ? ` ${e.fn.split('::')[1]}` : ''}`);
+  const frontV = await core.view(front.id);
+  assert.deepEqual(at(frontV).sort(), ['server server/index.js:15', 'ui src/main.jsx:6']); // интерфейс и сервер — две программы
+  assert.deepEqual(at(await core.view(back.id)), ['app app/main.py:10']);
+  assert.equal(at(ne)[0], 'server src/main.ts:7 bootstrap');
+  assert.equal(at(ex)[0], 'server src/server.js:29');
+  assert.equal(at(fl2)[0], 'app app/__init__.py:11 create_app');
+  assert.ok(frontV.files.every((f) => f.path !== 'package.json')); // настройки проекта читаются, но в файлы проекта не попадают
+  // команда из package.json и строка в кавычках, которая лишь похожа на запуск
+  const mf = path.join(tmp, 'manifest_app');
+  fs.mkdirSync(path.join(mf, 'src/cli'), { recursive: true });
+  fs.writeFileSync(path.join(mf, 'package.json'), JSON.stringify({ name: 'm', scripts: { start: 'node src/cli/run.js' } }));
+  fs.writeFileSync(path.join(mf, 'src/cli/run.js'), "import { go } from '../lib.js';\nexport function main() { go(); }\nmain();\n");
+  fs.writeFileSync(path.join(mf, 'src/lib.js'), "export function go() { return 'app.listen(3000) в строке — не запуск'; }\n");
+  const mv = await core.createSession(mf);
+  assert.deepEqual(mv.entries.map((e) => [e.file, e.cmd]), [['src/cli/run.js', 'npm run start → node src/cli/run.js']]);
+  core.deleteSession(mv.id);
+  step('с чего начинается программа: app.listen, FastAPI(), NestFactory, create_app, createRoot, команда из package.json');
+
   // 10. обновление: изменённая, новая и удалённая функции
   const copy = path.join(tmp, 'py-copy');
   fs.cpSync(PY, copy, { recursive: true });

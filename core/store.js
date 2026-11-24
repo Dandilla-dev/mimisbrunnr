@@ -166,6 +166,7 @@ export class Session {
     } catch (e) { db.run('ROLLBACK'); throw e; }
     this.restoreVersions();
     this.setMeta('web', analysis.web || { routes: [] });
+    this.setMeta('entries', analysis.entries || []);
     this.setMeta('roles', analysis.roles || {});
     this.setMeta('source', fetched.source);
     this.setMeta('commit', fetched.commit);
@@ -235,6 +236,7 @@ export class Session {
       sites: this.sites(),
       entities: this.entities(),
       web: this.meta('web', { routes: [] }),
+      entries: this.meta('entries', null), // null — разбор старой версии, точки запуска ещё не искали
       roles: this.meta('roles', {}),
       walks: this.walks(),
       stories: this.stories(),

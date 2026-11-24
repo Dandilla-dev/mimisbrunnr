@@ -337,6 +337,12 @@ export default function Graph({ nodes, edges, direction = 'RIGHT', height = 420,
                         {n.sub && <text x="14" y="40" fontSize={SUB_FONT} fontFamily="JetBrains Mono, monospace" fill="#6B756F">{n.sub.length > 42 ? `${n.sub.slice(0, 41)}…` : n.sub}</text>}
                         {lines.length > 0 && <line x1="14" x2={c.width - 12} y1={top - 6} y2={top - 6} stroke="#222A25" />}
                         {lines.map((l, i) => <text key={i} x="14" y={top + 6 + i * NOTE_LINE} fontSize={NOTE_FONT} fontFamily="Inter, sans-serif" fill="#A3AAA5">{l}</text>)}
+                        {n.start && (
+                          <g transform={`translate(${c.width - 52},-9)`}>
+                            <rect width="48" height="17" rx="8.5" fill="#1A1409" stroke={C.out} />
+                            <text x="24" y="12" textAnchor="middle" fontSize="9.5" fontFamily="JetBrains Mono, monospace" fontWeight="600" fill={C.out}>▶ СТАРТ</text>
+                          </g>
+                        )}
                         <title>{n.title || n.label}</title>
                       </g>
                     );

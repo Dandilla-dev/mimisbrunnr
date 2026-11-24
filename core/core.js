@@ -57,8 +57,9 @@ export class MimisCore {
     }
     if (!fetched) fetched = await fetchTarget(target, { ...opts, onProgress });
     if (s && fetched.source.type === 'github' && fetched.source.branch && !fetched.offline) s.cacheBranch(fetched.source.branch, fetched);
-    if (!fetched.files.length) throw new Error('Не нашёл в репозитории файлов Python или JavaScript/TypeScript.');
-    onProgress(`Разбираю ${fetched.files.length} файлов…`);
+    const codeCount = fetched.files.filter((f) => /\.(py|[cm]?[jt]sx?|prisma)$/.test(f.path)).length;
+    if (!codeCount) throw new Error('Не нашёл в репозитории файлов Python или JavaScript/TypeScript.');
+    onProgress(`Разбираю ${codeCount} файлов…`);
     const t0 = Date.now();
     let analysis;
     try { analysis = process.env.MIMIS_NO_WORKER === '1' ? await analyzeSources(fetched.files) : await analyzeOffThread(fetched.files); } catch (e) {

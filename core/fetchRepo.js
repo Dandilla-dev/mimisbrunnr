@@ -27,6 +27,8 @@ function wanted(rel) {
   const parts = rel.split('/');
   if (parts.some((p) => SKIP_DIRS.has(p) || (p.startsWith('.') && p.length > 1))) return false;
   if (/\.min\.js$|\.d\.ts$|\.bundle\.js$/.test(rel)) return false;
+  // настройки проекта — чтобы найти, с чего программа начинается (сами они не разбираются)
+  if (/(^|\/)(package\.json|pyproject\.toml|setup\.cfg|Procfile|Dockerfile|index\.html)$/.test(rel)) return true;
   return Boolean(grammarFor(rel)) || rel.endsWith(".prisma");
 }
 

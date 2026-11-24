@@ -3,6 +3,7 @@ import { initParsers, grammarFor } from './parse/treesitter.js';
 import { parsePython, pythonSites } from './parse/python.js';
 import { parseJs, jsSites } from './parse/js.js';
 import { parsePrisma } from './parse/prisma.js';
+import { findEntries } from './entry.js';
 
 /**
  * @param {{path: string, text: string}[]} sources
@@ -82,7 +83,8 @@ export async function analyzeSources(sources) {
       if (eo?.length && !e.about) e.about = `отвечает: ${[...new Set(eo.map((o) => o.status).filter(Boolean))].join(', ') || eo.map((o) => o.text).join('; ')}`;
     }
   }
-  return { files, items, edges, sites, code, entities, web, roles, flows };
+  const entries = findEntries(sources, items);
+  return { files, items, edges, sites, code, entities, web, roles, flows, entries };
 }
 
 /**
