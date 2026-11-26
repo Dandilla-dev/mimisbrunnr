@@ -15,6 +15,7 @@ import { KIND_RU } from './useIndex';
 import { layerColor } from './MapColumn';
 import { ProjectDiagram, LayerDiagram, FnDiagram, RequestDiagram } from './Diagrams';
 import StartView from './Start';
+import HandbookNotes from './HandbookNotes';
 
 export const Badge = ({ status }) => status === 'fresh'
   ? <span className="font-mono text-[10px] text-moss">● разбор</span>
@@ -367,7 +368,8 @@ function FnView({ view, ix, id, onExplain }) {
               {expl && <Sec n="2" title={ent ? 'Поля простыми словами' : 'Что на входе и что на выходе'}><p className="text-[14px] leading-relaxed whitespace-pre-wrap">{expl.io}</p></Sec>}
               {ent && <Sec n="3" title="Поля и связи (из кода)"><EntityInfo view={view} ix={ix} e={ent} /></Sec>}
               {!ent && it.kind !== 'class' && <Sec n="3" title="Что внутри: данные и переменные"><Inside view={view} it={it} onMark={markLines} /></Sec>}
-              <Sec n="4" title="Связи">
+              <Sec n="4" title="Что здесь из языка и фреймворков"><HandbookNotes it={it} code={code} lang={f.lang} /></Sec>
+              <Sec n="5" title="Связи">
                 <FnDiagram view={view} ix={ix} id={id} />
                 <div className="text-[12px] text-mist mb-1.5 mt-4">Кто вызывает</div>{links(callers, (x) => ix.edgeKind[`${x}>${id}`], (x) => noteOf(x, id))}
                 <div className="text-[12px] text-mist mb-1.5 mt-3">Кого вызывает</div>{links(calls, (x) => ix.edgeKind[`${id}>${x}`], (x) => noteOf(id, x))}
@@ -381,8 +383,8 @@ function FnView({ view, ix, id, onExplain }) {
                   <button className="btn mt-4" onClick={() => dispatch(go({ t: 'scenario', id }))}><PathIcon className="w-4 h-4" />Пройти сценарий отсюда</button>
                 )}
               </Sec>
-              {expl && <Sec n="5" title="Пример"><div className="text-[13.5px] leading-relaxed bg-panel-2 border border-hairline-soft rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.example}</div></Sec>}
-              {expl && <Sec n="6" title="На что обратить внимание"><div className="text-[13.5px] leading-relaxed bg-bronze-dim border border-bronze/25 rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.watch}</div></Sec>}
+              {expl && <Sec n="6" title="Пример"><div className="text-[13.5px] leading-relaxed bg-panel-2 border border-hairline-soft rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.example}</div></Sec>}
+              {expl && <Sec n="7" title="На что обратить внимание"><div className="text-[13.5px] leading-relaxed bg-bronze-dim border border-bronze/25 rounded-xl px-3.5 py-2.5 whitespace-pre-wrap">{expl.watch}</div></Sec>}
               {expl && (
                 <div className="flex items-center gap-3 mt-5 text-[11.5px] text-mist-dim flex-wrap">
                   <span>{expl.edited ? 'Исправлено вручную' : `Написано: ${expl.model || 'ИИ'}`} · коммит {expl.commit_short} · {expl.updated}</span>

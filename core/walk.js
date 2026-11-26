@@ -2,6 +2,7 @@
 // Структуру (переменные, откуда и куда) находит разбор кода; модель пишет только текст.
 import { callModel, costOf, batchCostOf, extractJson, LlmError } from './llm.js';
 import { SYSTEM_PROMPT } from './explain.js';
+import { handbookFor, handbookPrompt } from './handbook.js';
 
 const CHARS_PER_TOKEN = 3;
 const MAX_LINES = 400;
@@ -24,7 +25,10 @@ function flowBrief(f) {
 
 export function walkPrompt(view, it, code, flow, callees) {
   const end = Math.min(it.end, it.line + MAX_LINES - 1);
-  const body = numbered(code.split('\n').slice(it.line - 1, end), it.line);
+  const own = code.split('\n').slice(it.line - 1, end);
+  const body = numbered(own, it.line);
+  const lang = view.files?.find((f) => f.path === it.file)?.lang || (it.file.endsWith('.py') ? 'python' : 'js');
+  const hb = handbookPrompt(handbookFor(own.join('\n'), { fileCode: code, lang, limit: 6 }));
   return `Проект: ${view.title}. Файл: ${it.file}. Разбери функцию ${it.name} по шагам — так, чтобы ученик понял, что происходит в каждой строке: какие данные откуда приходят, что с ними делается и куда они уходят.
 
 Код (слева — номера строк):
@@ -35,7 +39,7 @@ ${body}${end < it.end ? `\n… (ещё ${it.end - end} строк)` : ''}
 Что нашёл разбор кода (это точно, опирайся на это):
 ${flowBrief(flow) || 'нет данных'}
 ${callees.length ? `Вызывает функции проекта: ${callees.join(', ')}.` : ''}
-
+${hb}
 Раздели код на 3–12 смысловых шагов подряд, без пропусков, от первой строки тела до последней.
 Верни JSON:
 { "steps": [ { "from": номер первой строки шага, "to": номер последней строки шага, "title": "2–5 слов", "text": "2–4 предложения: что происходит, какие переменные появляются и откуда берутся, куда уходят данные, что будет при ошибке" } ] }`;

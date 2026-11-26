@@ -3,6 +3,7 @@
 import { callModel, costOf, extractJson, LlmError } from './llm.js';
 import { buildScenario, ROLE_RU } from './scenario.js';
 import { SYSTEM_PROMPT } from './explain.js';
+import { handbookFor, handbookPrompt } from './handbook.js';
 
 const CHARS_PER_TOKEN = 3;
 const MAX_FN_LINES = 150;
@@ -28,6 +29,7 @@ export function storyPrompt(view, getCode, sc) {
   }).join('\n');
   let budget = MAX_CODE_CHARS;
   const blocks = [];
+  const hbIds = new Map();
   const done = new Set();
   for (const s of sc.steps) {
     if (!s.id || done.has(s.id) || budget <= 0) continue;
@@ -39,6 +41,8 @@ export function storyPrompt(view, getCode, sc) {
     if (end < it.end) text += `\n… (ещё ${it.end - end} строк)`;
     if (text.length > budget) text = `${text.slice(0, budget)}\n…`;
     budget -= text.length;
+    const fileCode = getCode(it.file) || '';
+    for (const e of handbookFor(code.slice(it.line - 1, end).join('\n'), { fileCode, lang: it.file.endsWith('.py') ? 'py' : 'js', limit: 6 })) if (!hbIds.has(e.id)) hbIds.set(e.id, e);
     blocks.push(`<code name="${it.name}" file="${it.file}">\n${text}\n</code>`);
   }
   const start = sc.route ? `запроса ${sc.route.method} ${sc.route.path} (обработчик ${entry.name}, ${entry.file}:${entry.line})` : `${entry.name} (${entry.file}:${entry.line}${entry.route ? `, ${entry.route}` : ''})`;
@@ -52,7 +56,7 @@ ${stepLines}
 
 Код функций из сценария (слева — номера строк):
 ${blocks.join('\n\n')}
-
+${handbookPrompt([...hbIds.values()].slice(0, 8))}
 Расскажи этот сценарий ученику: что происходит, в каком порядке и зачем.
 Верни JSON:
 {

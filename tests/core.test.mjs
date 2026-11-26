@@ -13,6 +13,7 @@ import { zipSync, strToU8 } from 'fflate';
 import { MimisCore } from '../core/core.js';
 import { localGitInfo } from '../core/fetchRepo.js';
 import { buildScenario, entryPoints } from '../core/scenario.js';
+import { handbookFor } from '../core/handbook.js';
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const PY = path.join(FIX, 'py_app');
@@ -555,6 +556,16 @@ try {
   assert.deepEqual(mv.entries.map((e) => [e.file, e.cmd]), [['src/cli/run.js', 'npm run start → node src/cli/run.js']]);
   core.deleteSession(mv.id);
   step('с чего начинается программа: app.listen, FastAPI(), NestFactory, create_app, createRoot, команда из package.json');
+
+  // встроенный справочник: что из языка и фреймворков встречается в коде функции
+  const hbIds = (code, lang, fileCode) => handbookFor(code, { lang, fileCode }).map((e) => e.id);
+  const ctl = "export const addBook = async (req, res, next) => {\n  try { await svc.add(req.body); return res.sendStatus(201); } catch (err) { return next(err); }\n};";
+  assert.deepEqual(hbIds(ctl, 'javascript').slice(0, 6), ['js-async', 'ex-handler', 'js-try', 'ex-req', 'ex-res', 'ex-next']);
+  assert.ok(!hbIds("throw new Error('res.json(x) is not a function');", 'javascript').includes('ex-res')); // в тексте строки — не вызов
+  assert.ok(hbIds('const b = await Book.findByPk(id);', 'javascript', "import { Book } from '../models/book.model.js';").includes('sq-find'));
+  assert.ok(!hbIds('const b = await Book.findByPk(id);', 'javascript', "import { Book } from './x.js';").includes('sq-find')); // без признаков Sequelize — не подсказываем
+  assert.deepEqual(hbIds('@router.post("/x")\nasync def create(body: OrderIn, db = Depends(get_db)):\n    raise HTTPException(status_code=404)', 'python', 'from fastapi import APIRouter').slice(0, 5), ['py-deco', 'fa-route', 'py-async', 'fa-depends', 'py-raise']);
+  step('справочник: Express, Sequelize, FastAPI, основы JS и Python — по коду функции, строки не считаются');
 
   // 10. обновление: изменённая, новая и удалённая функции
   const copy = path.join(tmp, 'py-copy');

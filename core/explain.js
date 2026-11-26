@@ -3,6 +3,7 @@
 // текст; структуру (функции, строки, связи) она не придумывает.
 import { callModel, costOf, extractJson, LlmError, batchCostOf, batchUnsupported, submitBatch, batchStatus, batchResults, cancelBatch } from './llm.js';
 import { walkPlanAll, parseWalk } from './walk.js';
+import { handbookFor, handbookPrompt } from './handbook.js';
 
 const KIND_RU = { function: 'функция', method: 'метод', class: 'класс', component: 'React-компонент', hook: 'React-хук', route: 'маршрут', entity: 'сущность' };
 const ORM_RU = { sequelize: 'Sequelize', mongoose: 'Mongoose', typeorm: 'TypeORM', prisma: 'Prisma', sqlalchemy: 'SQLAlchemy', sqlmodel: 'SQLModel', pydantic: 'Pydantic (схема данных)', dataclass: 'dataclass', django: 'Django', dto: 'DTO с проверками' };
@@ -88,13 +89,16 @@ function batchPrompt(view, file, items, code, callers, callees, purpose) {
   const body = code.length <= WHOLE_FILE_LIMIT
     ? numbered(code)
     : items.map((it) => `… строки ${it.line}–${it.end}:\n${numbered(code, it.line, it.end)}`).join('\n\n');
+  const lines = code.split('\n');
+  const own = items.map((it) => lines.slice(it.line - 1, it.end).join('\n')).join('\n');
+  const hb = handbookPrompt(handbookFor(own, { fileCode: code, lang, limit: 8 }));
   return `Проект: ${view.title}. Файл: ${file} (${lang}).
 ${purpose ? `Назначение файла (из прошлого разбора): ${purpose}\n` : ''}
 Код (слева — номера строк):
 <code>
 ${body}
 </code>
-
+${hb}${knownTerms(view)}
 Объясни эти функции и классы:
 ${list}
 
@@ -115,6 +119,12 @@ ${list}
 }
 В "terms" — только термины, которые встретились в этом коде и которые новичок может не знать (0–5 штук).
 Для сущностей (моделей данных): в "what" — что она хранит и зачем проекту, в "io" — поля простыми словами (что значит каждое, какие ограничения), в "example" — пример одной записи с конкретными значениями, в "watch" — связи с другими сущностями (что значит «многие-ко-многим», какие методы появляются из связи, например setAuthors) и подводные камни.`;
+}
+
+/** Термины, которые уже есть в словаре проекта: второй раз в «terms» их не нужно. */
+function knownTerms(view) {
+  const t = (view.terms || []).map((x) => x.term).slice(0, 60);
+  return t.length ? `\nУже есть в словаре проекта (в "terms" их не повторяй): ${t.join(', ')}.\n` : '';
 }
 
 function overviewPrompt(view) {
