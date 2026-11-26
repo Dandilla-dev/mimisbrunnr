@@ -67,7 +67,7 @@ export default function SessionScreen() {
       const d = r.payload.lastUpdate;
       dispatch(toast(d.from === d.to && !d.changed && !d.added && !d.removed
         ? 'Код не изменился.'
-        : `Код обновлён (${d.from} → ${d.to}): изменено ${d.changed}, новых ${d.added}, удалено ${d.removed}.`));
+        : `Код обновлён (${d.from} → ${d.to}): изменено ${d.changed}, новых ${d.added}, удалено ${d.removed}.${d.moved?.length ? ` Пояснения перешли к переименованным функциям: ${d.moved.length}.` : ''}`));
     }
   }
 

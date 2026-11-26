@@ -94,7 +94,7 @@ export class MimisCore {
     const oldCommit = s.meta('commit');
     const { fetched, analysis } = await this._load(target, onProgress, s);
     const byFolder = s.meta('layers_source', 'folders') === 'folders';
-    s.writeAnalysis(fetched, analysis, byFolder ? layersByFolder(Object.keys(analysis.files)) : null, null);
+    const settled = s.writeAnalysis(fetched, analysis, byFolder ? layersByFolder(Object.keys(analysis.files)) : null, null);
     const after = Object.fromEntries(analysis.items.map((i) => [i.id, i.hash]));
     const diff = {
       at: new Date().toISOString().slice(0, 16).replace('T', ' '),
@@ -104,6 +104,8 @@ export class MimisCore {
       changed: Object.keys(after).filter((k) => before[k] && before[k] !== after[k]).length,
       added: Object.keys(after).filter((k) => !before[k]).length,
       removed: Object.keys(before).filter((k) => !after[k]).length,
+      moved: settled?.moved || [], // пояснения, которые перешли к переименованным функциям
+      inBranches: settled?.inBranches || 0, // пояснения функций, которые есть только в других ветках
     };
     // сколько пояснений нашлось для кода этой ветки (написанных раньше — в этой или другой ветке)
     const fresh = s.view().items.filter((i) => i.status === 'fresh').length;
@@ -223,6 +225,9 @@ export class MimisCore {
     return s.view();
   }
   async confirmExplanation(id, itemId) { const s = await this.sessions.get(id); s.confirmExplanation(itemId); s.save(); return s.view(); }
+  async moveExplanation(id, from, to) { const s = await this.sessions.get(id); s.moveExplanation(from, to, false); s.save(); return s.view(); }
+  async dismissRename(id, from, to) { const s = await this.sessions.get(id); s.dismissRename(from, to); s.save(); return s.view(); }
+  async deleteOrphans(id) { const s = await this.sessions.get(id); const n = s.deleteOrphans(); s.save(); return { removed: n, view: s.view() }; }
   async deleteExplanation(id, itemId) { const s = await this.sessions.get(id); s.deleteExplanation(itemId); s.save(); return s.view(); }
 
   // ---- сценарии: рассказ от ИИ ----

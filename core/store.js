@@ -107,8 +107,36 @@ CREATE TABLE IF NOT EXISTS walk_versions(id TEXT, hash TEXT, json TEXT, PRIMARY 
 CREATE TABLE IF NOT EXISTS branch_cache(branch TEXT PRIMARY KEY, commit_json TEXT, files TEXT, updated TEXT);
 CREATE TABLE IF NOT EXISTS layers(id TEXT PRIMARY KEY, name TEXT, description TEXT, ord INT);
 CREATE TABLE IF NOT EXISTS terms(term TEXT PRIMARY KEY, definition TEXT);
+CREATE TABLE IF NOT EXISTS orphan_code(id TEXT PRIMARY KEY, kind TEXT, body TEXT);
 CREATE TABLE IF NOT EXISTS usage(ts TEXT, model TEXT, input_tokens INT, output_tokens INT, cost REAL, note TEXT);
 `;
+
+/** Тело функции без имени, пустых строк и отступов — для сравнения «та же функция, другое имя». */
+function bodyOf(code, it) {
+  const short = String(it.name).split('.').pop();
+  const re = /^[\w$]+$/.test(short) ? new RegExp(`\\b${short.replace(/[$]/g, '\\$&')}\\b`, 'g') : null;
+  return String(code).split('\n').slice(it.line - 1, it.end)
+    .map((l) => l.trim()).filter((l) => l && !/^(\/\/|#)/.test(l))
+    .map((l) => (re ? l.replace(re, '§') : l)).join('\n');
+}
+/** Насколько похожи два тела функций: доля совпадающих строк (0…1). */
+function similarity(a, b) {
+  const A = a.split('\n'), B = b.split('\n');
+  const count = {};
+  for (const l of A) count[l] = (count[l] || 0) + 1;
+  let same = 0;
+  for (const l of B) if (count[l] > 0) { same += 1; count[l] -= 1; }
+  return (2 * same) / (A.length + B.length || 1);
+}
+/** Есть ли в тексте файла функция/метод/класс с таким именем. */
+function definedIn(text, name) {
+  if (!text) return false;
+  const parts = String(name).split('.');
+  if (!parts.every((x) => /^[\w$]+$/.test(x))) return false; // маршруты и анонимные обработчики (app.use@19) — не функции с именем
+  const esc = (x) => x.replace(/[$]/g, '\\$&');
+  const def = (x) => new RegExp(`(?:\\bdef|\\bfunction\\*?|\\bclass)\\s+${esc(x)}\\b|\\b${esc(x)}\\s*[:=]\\s*(?:async\\s*)?(?:\\(|function\\b|\\w+\\s*=>)|^\\s*(?:(?:public|private|protected|static|async|get|set)\\s+)*${esc(x)}\\s*\\([^)]*\\)\\s*[:{]`, 'm').test(text);
+  return parts.every(def);
+}
 
 function rows(db, q, params = []) {
   const st = db.prepare(q);
@@ -138,6 +166,17 @@ export class Session {
   writeAnalysis(fetched, analysis, layers, layersSource) {
     const db = this.db;
     const oldFiles = Object.fromEntries(rows(db, 'SELECT path, purpose, layer FROM files').map((r) => [r.path, r]));
+    // код объяснённых функций, которых в новой версии нет, — чтобы узнать их, если их просто переименовали
+    {
+      const newIds = new Set(analysis.items.map((i) => i.id));
+      const explIds = new Set(rows(db, 'SELECT id FROM expl').map((r) => r.id));
+      const oldCode = {};
+      for (const it of rows(db, 'SELECT id, file, name, kind, line, end_line AS "end" FROM items')) {
+        if (!explIds.has(it.id) || newIds.has(it.id)) continue;
+        oldCode[it.file] ??= rows(db, 'SELECT code FROM files WHERE path=?', [it.file])[0]?.code || '';
+        if (oldCode[it.file]) db.run('INSERT OR REPLACE INTO orphan_code VALUES (?,?,?)', [it.id, it.kind, bodyOf(oldCode[it.file], it)]);
+      }
+    }
     db.run('BEGIN');
     try {
       db.run('DELETE FROM files'); db.run('DELETE FROM items'); db.run('DELETE FROM edges'); db.run('DELETE FROM sites'); db.run('DELETE FROM entities'); db.run('DELETE FROM flows');
@@ -172,6 +211,102 @@ export class Session {
     this.setMeta('commit', fetched.commit);
     if (layersSource) this.setMeta('layers_source', layersSource);
     this.setMeta('updated', now());
+    return this.settleOrphans(analysis.code);
+  }
+
+  /**
+   * Пояснения функций, которых в коде больше нет:
+   *  — функция есть в другой скачанной ветке → пояснение убирается из списка (его версия сохранена и вернётся при переключении);
+   *  — у новой функции тот же код, только имя или место другое → пояснение переходит к ней;
+   *  — код похож → подсказка «похоже, переименована» (перенести можно одной кнопкой).
+   * @returns { moved: [{from, to}], inBranches: число }
+   */
+  settleOrphans(code) {
+    const db = this.db;
+    const items = this.items();
+    const ids = new Set(items.map((i) => i.id));
+    let expl = this.explMap();
+    const orphans = Object.keys(expl).filter((id) => !ids.has(id));
+    db.run(`DELETE FROM orphan_code WHERE id NOT IN (SELECT id FROM expl)`);
+    for (const id of ids) db.run('DELETE FROM orphan_code WHERE id=?', [id]);
+    const result = { moved: [], inBranches: 0 };
+    const keptBefore = this.meta('orphan_branches', {});
+    for (const id of Object.keys(keptBefore)) if (ids.has(id)) delete keptBefore[id]; // функция снова есть в коде
+    this.setMeta('orphan_branches', keptBefore);
+    if (!orphans.length) { this.setMeta('rename_hints', []); return result; }
+    // 1. есть в другой ветке
+    const cur = this.meta('source')?.branch || '';
+    const kept = { ...this.meta('orphan_branches', {}) };
+    const other = rows(db, 'SELECT branch, files FROM branch_cache WHERE branch<>?', [cur]);
+    const filesOf = {};
+    const left = [];
+    for (const id of orphans) {
+      const [file, name] = [id.slice(0, id.indexOf('::')), id.slice(id.indexOf('::') + 2)];
+      const found = [];
+      for (const b of other) {
+        filesOf[b.branch] ??= Object.fromEntries(JSON.parse(b.files || '[]').map((f) => [f.path, f.text]));
+        if (definedIn(filesOf[b.branch][file], name)) found.push(b.branch);
+      }
+      if (found.length) {
+        // версия пояснения уже лежит в expl_versions — при переключении на ту ветку оно вернётся
+        db.run('INSERT OR IGNORE INTO expl_versions VALUES (?,?,?)', [id, expl[id].hash, JSON.stringify(expl[id])]);
+        db.run('DELETE FROM expl WHERE id=?', [id]);
+        kept[id] = found;
+        result.inBranches += 1;
+      } else left.push(id);
+    }
+    for (const id of Object.keys(kept)) if (ids.has(id)) delete kept[id];
+    this.setMeta('orphan_branches', kept);
+    // 2. переименованные и перенесённые
+    expl = this.explMap();
+    const bodies = Object.fromEntries(rows(db, 'SELECT id, kind, body FROM orphan_code').map((r) => [r.id, r]));
+    const candidates = items.filter((i) => !expl[i.id] && code?.[i.file]).map((i) => ({ it: i, body: bodyOf(code[i.file], i) }));
+    const dismissed = new Set(this.meta('rename_dismissed', []));
+    const taken = new Set();
+    const hints = [];
+    for (const id of left) {
+      const ob = bodies[id];
+      if (!ob) continue;
+      let best = null;
+      for (const c of candidates) {
+        if (taken.has(c.it.id) || c.it.kind !== ob.kind || dismissed.has(`${id}>${c.it.id}`)) continue;
+        const score = c.body === ob.body ? 1 : similarity(ob.body, c.body);
+        if (!best || score > best.score) best = { to: c.it.id, score };
+      }
+      if (!best || best.score < 0.6) continue;
+      if (best.score === 1) { this.moveExplanation(id, best.to, true); taken.add(best.to); result.moved.push({ from: id, to: best.to }); } else hints.push({ from: id, to: best.to, score: Math.round(best.score * 100) });
+    }
+    this.setMeta('rename_hints', hints);
+    return result;
+  }
+
+  /** Перенести пояснение (и разбор по шагам) с удалённой функции на другую. same — код тот же, пояснение актуально. */
+  moveExplanation(from, to, same = false) {
+    const db = this.db;
+    const r = rows(db, 'SELECT * FROM expl WHERE id=?', [from])[0];
+    const it = rows(db, 'SELECT hash FROM items WHERE id=?', [to])[0];
+    if (!r || !it) throw new Error('Нечего переносить.');
+    db.run('DELETE FROM expl WHERE id=?', [to]);
+    db.run('UPDATE expl SET id=?, hash=?, updated=? WHERE id=?', [to, same ? it.hash : r.hash, now(), from]);
+    const w = rows(db, 'SELECT * FROM walks WHERE id=?', [from])[0];
+    if (w) { db.run('DELETE FROM walks WHERE id=?', [to]); db.run('UPDATE walks SET id=?, hash=? WHERE id=?', [to, same ? it.hash : w.hash, from]); }
+    db.run('DELETE FROM orphan_code WHERE id=?', [from]);
+    this.setMeta('rename_hints', this.meta('rename_hints', []).filter((h) => h.from !== from && h.to !== to));
+    this.snapshot(to);
+  }
+  dismissRename(from, to) {
+    this.setMeta('rename_dismissed', [...new Set([...this.meta('rename_dismissed', []), `${from}>${to}`])].slice(-500));
+    this.setMeta('rename_hints', this.meta('rename_hints', []).filter((h) => !(h.from === from && h.to === to)));
+  }
+  /** Удалить пояснения всех функций, которых нет ни в этой версии кода, ни в скачанных ветках. */
+  deleteOrphans() {
+    const ids = new Set(this.items().map((i) => i.id));
+    const gone = Object.keys(this.explMap()).filter((id) => !ids.has(id));
+    for (const id of gone) {
+      for (const t of ['expl', 'expl_versions', 'walks', 'walk_versions', 'orphan_code']) this.db.run(`DELETE FROM ${t} WHERE id=?`, [id]);
+    }
+    this.setMeta('rename_hints', []);
+    return gone.length;
   }
 
   items() {
@@ -247,6 +382,8 @@ export class Session {
       stories: this.stories(),
       expl: Object.fromEntries(Object.entries(expl).filter(([k]) => ids.has(k))),
       orphans: Object.keys(expl).filter((k) => !ids.has(k)),
+      renameHints: this.meta('rename_hints', []).filter((h) => expl[h.from] && ids.has(h.to) && !expl[h.to]),
+      orphanBranches: this.meta('orphan_branches', {}),
       terms: rows(this.db, 'SELECT term, definition FROM terms ORDER BY term'),
       usage: rows(this.db, 'SELECT COALESCE(SUM(input_tokens),0) AS inTok, COALESCE(SUM(output_tokens),0) AS outTok, COALESCE(SUM(cost),0) AS cost FROM usage')[0],
       counts: { ...counts, total: items.length },
@@ -281,7 +418,7 @@ export class Session {
     const r = { id, phrase: entry.phrase || '', what: entry.what || '', io: entry.io || '', example: entry.example || '', watch: entry.watch || '', hash, model, commit_short: '', updated: now(), edited: 0, branch: '' };
     this.db.run('INSERT OR REPLACE INTO expl_versions VALUES (?,?,?)', [id, hash, JSON.stringify(r)]);
   }
-  deleteExplanation(id) { this.db.run('DELETE FROM expl WHERE id=?', [id]); this.db.run('DELETE FROM expl_versions WHERE id=?', [id]); }
+  deleteExplanation(id) { for (const t of ['expl', 'expl_versions', 'orphan_code']) this.db.run(`DELETE FROM ${t} WHERE id=?`, [id]); }
 
   // ---- версии пояснений: у каждой версии кода функции (ветки) — своё пояснение ----
   snapshot(id) {

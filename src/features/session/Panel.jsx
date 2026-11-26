@@ -403,24 +403,65 @@ function FnView({ view, ix, id, onExplain }) {
 // ---------------------------------------------------------------- требует внимания / словарь
 function Todo({ view, ix }) {
   const dispatch = useDispatch();
+  const [confirmAll, setConfirmAll] = useState(false);
   const stale = view.items.filter((i) => i.status === 'stale');
   const none = view.items.filter((i) => i.status === 'none');
-  async function drop(id) {
-    await window.mimis.deleteExplanation(view.id, id);
-    dispatch(reloadSession(view.id));
+  const hints = view.renameHints || [];
+  const hinted = new Set(hints.map((h) => h.from));
+  const kept = Object.entries(view.orphanBranches || {});
+  async function run(p, msg) {
+    try { await p; await dispatch(reloadSession(view.id)); if (msg) dispatch(toast(msg)); } catch (e) { dispatch(toast(e.message, 'error')); }
   }
+  const nm = (id) => id.slice(id.indexOf('::') + 2);
+  const fl = (id) => id.slice(0, id.indexOf('::'));
   const list = (arr) => (arr.length ? <div className="flex flex-wrap gap-1.5">{arr.map((i) => <FnLink key={i.id} ix={ix} id={i.id} />)}</div> : <div className="text-[13px] text-mist-dim">Нет.</div>);
   return (
     <div className="max-w-[900px]">
       <h1 className="font-display font-semibold text-[22px]">Требует внимания</h1>
+      {hints.length > 0 && (
+        <Sec n="↪" title={`Похоже, переименованы или перенесены (${hints.length})`}>
+          <div className="text-[12.5px] text-mist mb-2 leading-relaxed">Функция с таким именем пропала, а появилась новая с очень похожим кодом. Если это она — перенеси пояснение: оно встанет к новой функции с пометкой «код изменился», чтобы ты сверил текст.</div>
+          {hints.map((h) => (
+            <div key={`${h.from}>${h.to}`} className="card px-3.5 py-2.5 mb-2 flex items-center gap-3 flex-wrap">
+              <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed">
+                <span className="font-mono line-through text-mist">{nm(h.from)}</span><span className="text-mist-dim"> · {fl(h.from)}</span>
+                <span className="text-mist"> → </span>
+                <button className="font-mono hover:text-bronze" onClick={() => dispatch(go({ t: 'fn', id: h.to }))}>{nm(h.to)}</button><span className="text-mist-dim"> · {fl(h.to)}</span>
+                <span className="text-bronze text-[11.5px]"> · код совпадает на {h.score}%</span>
+              </div>
+              <button className="btn-bronze py-1.5" onClick={() => run(window.mimis.moveExplanation(view.id, h.from, h.to), 'Пояснение перенесено — сверь его с новым кодом.')}>Перенести пояснение</button>
+              <button className="btn-ghost" onClick={() => run(window.mimis.dismissRename(view.id, h.from, h.to))}>Это другая функция</button>
+            </div>
+          ))}
+        </Sec>
+      )}
       <Sec n="⚠" title={`Код изменился после пояснения (${stale.length})`}>{list(stale)}</Sec>
-      <Sec n="○" title={`Нет пояснения (${none.length})`}>{list(none.slice(0, 300))}{none.length > 300 && <div className="text-[12px] text-mist-dim mt-2">…и ещё {none.length - 300}</div>}</Sec>
       <Sec n="×" title={`Пояснения к удалённым функциям (${view.orphans.length})`}>
         {view.orphans.length ? view.orphans.map((o) => (
-          <div key={o} className="flex items-center gap-3 mb-1.5"><span className="font-mono text-[12px] break-all">{o}</span><button className="btn-ghost" onClick={() => drop(o)}>Удалить пояснение</button></div>
+          <div key={o} className="flex items-center gap-3 mb-1.5 flex-wrap">
+            <span className="font-mono text-[12px] break-all">{o}</span>
+            {hinted.has(o) && <span className="text-[11px] text-bronze">похоже, переименована — см. выше</span>}
+            <button className="btn-ghost" onClick={() => run(window.mimis.deleteExplanation(view.id, o))}>Удалить пояснение</button>
+          </div>
         )) : <div className="text-[13px] text-mist-dim">Нет.</div>}
-        {view.orphans.length > 0 && <div className="text-[12px] text-mist-dim mt-1">Функция могла быть переименована — тогда новая появится в списке «Нет пояснения».</div>}
+        {view.orphans.length > 0 && <div className="text-[12px] text-mist-dim mt-1 leading-relaxed">Этих функций нет ни в этой версии кода, ни в скачанных ветках. Если функцию просто переименовали или перенесли без изменений, пояснение переходит к ней само при «Обновить код».</div>}
+        {view.orphans.length > 1 && (confirmAll ? (
+          <div className="flex items-center gap-2 mt-3 flex-wrap">
+            <span className="text-[13px]">Удалить все {view.orphans.length} пояснений к удалённым функциям? Вернуть их будет нельзя.</span>
+            <button className="btn border-danger/50" onClick={() => { setConfirmAll(false); run(window.mimis.deleteOrphans(view.id), `Удалено пояснений: ${view.orphans.length}.`); }}>Да, удалить все</button>
+            <button className="btn-ghost" onClick={() => setConfirmAll(false)}>Нет</button>
+          </div>
+        ) : <button className="btn mt-3" onClick={() => setConfirmAll(true)}>Удалить все пояснения к удалённым функциям</button>)}
       </Sec>
+      <Sec n="○" title={`Нет пояснения (${none.length})`}>{list(none.slice(0, 300))}{none.length > 300 && <div className="text-[12px] text-mist-dim mt-2">…и ещё {none.length - 300}</div>}</Sec>
+      {kept.length > 0 && (
+        <Sec n="⑂" title={`Сохранены для других веток (${kept.length})`}>
+          <div className="text-[12.5px] text-mist mb-2 leading-relaxed">Этих функций нет в открытой ветке, но они есть в других. Их пояснения не удалены: переключишься на ту ветку — они вернутся сами. Делать ничего не нужно.</div>
+          {kept.slice(0, 200).map(([id, bs]) => (
+            <div key={id} className="text-[12px] mb-1"><span className="font-mono">{id}</span><span className="text-mist"> · есть в {bs.length > 1 ? 'ветках' : 'ветке'} </span><span className="font-mono text-bronze">{bs.join(', ')}</span></div>
+          ))}
+        </Sec>
+      )}
     </div>
   );
 }

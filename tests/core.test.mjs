@@ -39,6 +39,7 @@ const zipData = zipFolder(JS, 'example-js_app-abc1234');
 const JS2 = path.join(tmp, 'js_feature');
 fs.cpSync(JS, JS2, { recursive: true });
 fs.writeFileSync(path.join(JS2, 'src/utils/format.ts'), "export function formatPrice(n: number): string {\n  return `${Math.round(n)} руб.`;\n}\n");
+fs.rmSync(path.join(JS2, 'src/legacy'), { recursive: true }); // в ветке feature старый код удалён
 const zipFeature = zipFolder(JS2, 'example-js_app-fea7ure');
 let zipDownloads = 0;
 const gh = http.createServer((req, res) => {
@@ -293,10 +294,14 @@ try {
   assert.equal(v.commit.short, 'fea7ure');
   assert.equal(v.items.find((i) => i.id === FP).status, 'stale'); // код другой — пояснение от main помечено
   assert.equal(v.counts.fresh, v.counts.total - 1); // остальные функции те же — пояснения на месте
+  assert.deepEqual(v.orphans, []); // src/legacy есть в main — это не «удалённые», а «есть в другой ветке»
+  assert.ok(Object.keys(v.orphanBranches).length > 0 && Object.values(v.orphanBranches).every((b) => b.join() === 'main'));
   await (await core.startExplain(front.id, { kind: 'item', id: FP })).promise;
   assert.equal((await core.view(front.id)).items.find((i) => i.id === FP).status, 'fresh');
   v = await core.switchBranch(front.id, 'main');
   assert.equal(v.items.find((i) => i.id === FP).status, 'fresh'); // вернулось пояснение для кода из main
+  assert.ok(v.items.filter((i) => i.file.startsWith('src/legacy/')).every((i) => i.status === 'fresh')); // и для src/legacy
+  assert.deepEqual(v.orphanBranches, {});
   assert.equal(v.expl[FP].branch, 'main');
   v = await core.switchBranch(front.id, 'feature');
   assert.equal(v.items.find((i) => i.id === FP).status, 'fresh'); // и для кода из feature
@@ -574,17 +579,32 @@ try {
   await (await core.startExplain(s2.id, { kind: 'file', file: 'app/rules.py' })).promise;
   const f = path.join(copy, 'app/rules.py');
   const src = fs.readFileSync(f, 'utf8');
+  // classify переименована и чуть изменена, _rule_night_time переименована без изменений,
+  // _rule_new_customer удалена, new_helper добавлена
   const changed = src.replace('elif sum(weak) >= 2:', 'elif sum(weak) >= 1:').replaceAll('_rule_night_time', '_rule_late_hour')
+    .replace('def classify(order):', 'def classify_order(order):')
+    .replace('def _rule_new_customer(order):\n    return order.get("orders_before", 0) == 0\n', '')
     + '\n\ndef new_helper(x):\n    return x\n';
   assert.notEqual(changed, src);
   fs.writeFileSync(f, changed);
   v = await core.updateSession(s2.id);
   const st = (id) => v.items.find((i) => i.id === id)?.status;
-  assert.equal(st('app/rules.py::classify'), 'stale');
   assert.equal(st('app/rules.py::new_helper'), 'none');
   assert.equal(st('app/rules.py::_rule_big_amount'), 'fresh');
-  assert.ok(v.orphans.includes('app/rules.py::_rule_night_time'));
-  step(`обновление: изменено ${v.lastUpdate.changed}, новых ${v.lastUpdate.added}, удалено ${v.lastUpdate.removed}; устаревшие и новые помечены`);
+  assert.equal(st('app/rules.py::_rule_late_hour'), 'fresh'); // тот же код, новое имя — пояснение перешло само
+  assert.deepEqual(v.lastUpdate.moved, [{ from: 'app/rules.py::_rule_night_time', to: 'app/rules.py::_rule_late_hour' }]);
+  assert.equal(st('app/rules.py::classify_order'), 'none');
+  assert.deepEqual(v.renameHints.map((h) => [h.from, h.to]), [['app/rules.py::classify', 'app/rules.py::classify_order']]);
+  assert.ok(v.renameHints[0].score >= 60 && v.renameHints[0].score < 100);
+  assert.deepEqual([...v.orphans].sort(), ['app/rules.py::_rule_new_customer', 'app/rules.py::classify']);
+  step(`обновление: изменено ${v.lastUpdate.changed}, новых ${v.lastUpdate.added}, удалено ${v.lastUpdate.removed}; переименованная без изменений — пояснение перешло само, похожая — подсказка`);
+  v = await core.moveExplanation(s2.id, 'app/rules.py::classify', 'app/rules.py::classify_order');
+  assert.equal(v.items.find((i) => i.id === 'app/rules.py::classify_order').status, 'stale'); // перенесено, но код другой — сверить
+  assert.deepEqual(v.renameHints, []);
+  const delAll = await core.deleteOrphans(s2.id);
+  assert.equal(delAll.removed, 1);
+  assert.deepEqual(delAll.view.orphans, []);
+  step('пояснения к удалённым: перенос к переименованной функции, удаление всех разом');
 
   // учебные проекты для тестов (tests/fixtures) — не часть разбираемого проекта
   const fx = path.join(tmp, 'with_fixtures');
