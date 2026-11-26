@@ -382,6 +382,27 @@ try {
   assert.ok(s0.db.exec("SELECT 1 FROM expl_versions WHERE id='app/rules.py::classify' AND hash='other-version'")[0]);
   assert.ok(realHash);
   step('пакет и смена ветки: пояснение сохранено для той версии кода, которую отправляли');
+  // разбор по шагам всех функций разом: сразу и пакетом
+  coreR.updateSettings({ provider: { type: 'openai', baseUrl: `http://127.0.0.1:${llmPort}/v1`, model: 'fake', priceIn: 2, priceOut: 10 }, apiKey: '', budgetUsd: 100 });
+  const we1 = await coreR.estimate(pb.id, { kind: 'file', file: 'app/services/orders.py', what: 'walk' });
+  assert.ok(we1.count > 0 && we1.estCost > 0 && we1.batch.estCost < we1.estCost);
+  const wa = await (await coreR.startExplain(pb.id, { kind: 'file', file: 'app/services/orders.py', what: 'walk' })).promise;
+  assert.equal(wa.status, "done", wa.log.join('\n'));
+  assert.equal(wa.done, we1.count);
+  let wv = await coreR.view(pb.id);
+  assert.ok(wv.items.filter((i) => i.file === 'app/services/orders.py' && wv.walks[i.id]?.hash === i.hash).length === we1.count);
+  assert.equal((await coreR.estimate(pb.id, { kind: 'file', file: 'app/services/orders.py', what: 'walk' })).count, 0); // второй раз — нечего
+  const weAll = await coreR.estimate(pb.id, { kind: 'all', what: 'walk' });
+  assert.ok(weAll.skipped > 0); // однострочные функции по шагам не разбираются
+  coreR.updateSettings({ provider: { type: 'anthropic', baseUrl: `http://127.0.0.1:${llmPort}`, model: 'fake-claude', priceIn: 2, priceOut: 10 }, apiKey: 'test-key' });
+  wv = await coreR.startBatch(pb.id, { kind: 'all', what: 'walk' });
+  assert.equal(wv.batch.what, 'walk');
+  assert.equal((await coreR.checkBatch(pb.id)).state, 'waiting');
+  cb = await coreR.checkBatch(pb.id);
+  assert.equal(cb.state, 'applied');
+  assert.equal(cb.result.done, weAll.count, JSON.stringify(cb.result.log));
+  assert.equal((await coreR.estimate(pb.id, { kind: 'all', what: 'walk' })).count, 0);
+  step(`разбор по шагам разом: файл — ${we1.count} функций сразу, весь проект — ${weAll.count} пакетом (короткие пропущены: ${weAll.skipped})`);
   coreR.deleteSession(pb.id);
   core.sessions.open.delete(pb.id);
 

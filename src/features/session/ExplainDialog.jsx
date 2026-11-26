@@ -15,6 +15,8 @@ export default function ExplainDialog({ view, scope, onClose }) {
   const [err, setErr] = useState(null);
   const [budget, setBudget] = useState(String(settings.budgetUsd));
   const [mode, setMode] = useState('now'); // now | batch
+  const [what, setWhat] = useState(scope.what || 'expl'); // expl — пояснения функций, walk — разбор по шагам
+  const walk = (job?.what || what) === 'walk';
   const [sending, setSending] = useState(false);
   const running = job?.status === 'running';
   const finished = job && job.status !== 'running';
@@ -24,8 +26,9 @@ export default function ExplainDialog({ view, scope, onClose }) {
 
   useEffect(() => {
     if (running) return;
-    window.mimis.estimate(view.id, scope).then(setEst).catch((e) => setErr(e.message));
-  }, [view.id, scope, running]);
+    setEst(null);
+    window.mimis.estimate(view.id, { ...scope, what }).then(setEst).catch((e) => setErr(e.message));
+  }, [view.id, scope, running, what]);
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -37,13 +40,13 @@ export default function ExplainDialog({ view, scope, onClose }) {
   const batch = mode === 'batch' && canBatch;
   async function start() {
     setErr(null);
-    const sc = { ...scope, budgetUsd: Math.max(0, Number(String(budget).replace(',', '.')) || 0) };
+    const sc = { ...scope, what, budgetUsd: Math.max(0, Number(String(budget).replace(',', '.')) || 0) };
     if (batch) {
       setSending(true);
       try {
         await window.mimis.startBatch(view.id, sc);
         await dispatch(reloadSession(view.id));
-        dispatch(toast('Пакет отправлен. Пояснения появятся, когда модель закончит — обычно в течение часа.'));
+        dispatch(toast(`Пакет отправлен. ${walk ? 'Разборы по шагам' : 'Пояснения'} появятся, когда модель закончит — обычно в течение часа.`));
         onClose();
       } catch (e) { setErr(e.message); } finally { setSending(false); }
       return;
@@ -60,7 +63,7 @@ export default function ExplainDialog({ view, scope, onClose }) {
     onClose();
   }
 
-  const what = scope.kind === 'all' ? 'весь проект' : scope.kind === 'file' ? `файл ${scope.file}` : `функцию ${scope.id.split('::')[1]}`;
+  const target = scope.kind === 'all' ? 'весь проект' : scope.kind === 'file' ? `файл ${scope.file}` : `функцию ${scope.id.split('::')[1]}`;
   const pct = job?.total ? Math.round((100 * job.done) / job.total) : 0;
 
   return (
@@ -69,10 +72,21 @@ export default function ExplainDialog({ view, scope, onClose }) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="label-mono">Объяснение с ИИ</div>
-            <div className="font-display font-semibold text-[19px] mt-1 break-words">Разобрать {what}</div>
+            <div className="font-display font-semibold text-[19px] mt-1 break-words">{walk ? 'Разобрать по шагам' : 'Объяснить'} {target}</div>
           </div>
           <button className="btn-ghost" onClick={onClose} aria-label="Закрыть"><CloseIcon className="w-4 h-4" /></button>
         </div>
+
+        {!job && scope.kind !== 'item' && (
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {[['expl', 'Пояснения функций', 'что делает каждая, вход и выход, пример, подводные камни'], ['walk', 'Разбор по шагам', 'код каждой функции делится на куски, и каждый объясняется построчно']].map(([k, t, d]) => (
+              <button key={k} onClick={() => setWhat(k)} className={`text-left rounded-xl border px-3 py-2.5 ${what === k ? 'border-bronze/60 bg-panel-2' : 'border-hairline-soft hover:bg-panel-2'}`}>
+                <div className={`text-[13.5px] font-medium ${what === k ? 'text-bronze' : ''}`}>{t}</div>
+                <div className="text-[11.5px] text-mist leading-snug mt-0.5">{d}</div>
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="mt-4 text-[13px] text-mist">
           Модель: <span className="font-mono text-stone">{p.model || 'не выбрана'}</span>{p.type === 'openai' && p.baseUrl ? <span className="font-mono"> · {p.baseUrl}</span> : null}
@@ -87,9 +101,11 @@ export default function ExplainDialog({ view, scope, onClose }) {
 
         {!job && est && (
           <div className="mt-5 bg-panel-2 border border-hairline-soft rounded-xl px-4 py-3.5 text-[13.5px] leading-relaxed">
-            {est.count === 0 && !est.overview ? 'Здесь всё уже объяснено.' : (
+            {est.count === 0 && !est.overview ? (walk ? `Здесь всё уже разобрано по шагам.${est.skipped ? ` Совсем короткие функции (${est.skipped}) по шагам не разбираю — им хватает обычного пояснения.` : ''}` : 'Здесь всё уже объяснено.') : (
               <>
-                <div>Функций и классов: <b>{est.count}</b> · запросов к модели: <b>{est.requests}</b>{est.overview ? ' (последний — обзор проекта и слои)' : ''}</div>
+                {walk
+                  ? <div>Функций для разбора по шагам: <b>{est.count}</b> · запросов к модели: <b>{est.requests}</b>{est.skipped ? <span className="text-mist"> · совсем короткие (до 3 строк) пропускаю: {est.skipped}</span> : null}</div>
+                  : <div>Функций и классов: <b>{est.count}</b> · запросов к модели: <b>{est.requests}</b>{est.overview ? ' (последний — обзор проекта и слои)' : ''}</div>}
                 <div className="mt-1">Примерно {tok(est.estIn)} токенов на входе и {tok(est.estOut)} на выходе.</div>
                 <div className="mt-1">
                   {est.priced ? <>Ориентировочная стоимость: <b className="text-bronze">{usd(est.estCost)}</b> <span className="text-mist">(оценка с запасом)</span></> : <span className="text-mist">Цены модели не указаны — стоимость не считаю (для локальных моделей это бесплатно).</span>}
@@ -104,7 +120,7 @@ export default function ExplainDialog({ view, scope, onClose }) {
             <legend className="label-mono mb-1.5">Как объяснять</legend>
             <div className="grid gap-2">
               {[
-                ['now', 'Сразу', 'Пояснения появляются по мере работы, за несколько минут.', est.priced ? usd(est.estCost) : '', ''],
+                ['now', 'Сразу', walk ? 'Разборы появляются по мере работы: три функции одновременно, обычно за несколько минут.' : 'Пояснения появляются по мере работы, за несколько минут.', est.priced ? usd(est.estCost) : '', ''],
                 ['batch', 'Пакетом — вдвое дешевле', 'Все запросы уходят модели одним пакетом. Модель делает их, когда у неё есть свободные мощности, поэтому берёт вдвое меньше. Ответ — обычно в течение часа, самое долгое — 24 часа. Приложение можно закрыть: пакет запомнится, и результаты заберутся при следующем открытии разбора.', est.priced ? usd(est.batch.estCost) : '', est.batch.why],
               ].map(([id, title, text, price, why]) => (
                 <label key={id} className={`flex gap-3 rounded-xl border px-3.5 py-2.5 ${why ? 'opacity-60 cursor-not-allowed border-hairline-soft' : `cursor-pointer ${mode === id ? 'border-bronze/60 bg-panel-2' : 'border-hairline-soft hover:bg-panel-2'}`}`}>
@@ -130,7 +146,7 @@ export default function ExplainDialog({ view, scope, onClose }) {
         {job && (
           <div className="mt-5">
             <div className="flex items-baseline justify-between text-[13px]">
-              <span>{running ? (job.file ? `Разбираю: ${job.file}` : 'Готовлюсь…') : job.status === 'done' ? 'Готово' : job.status === 'budget' ? 'Остановлено по лимиту' : job.status === 'stopped' ? 'Остановлено' : 'Ошибка'}</span>
+              <span>{running ? (job.file ? `${walk ? 'По шагам' : 'Разбираю'}: ${job.file}` : 'Готовлюсь…') : job.status === 'done' ? 'Готово' : job.status === 'budget' ? 'Остановлено по лимиту' : job.status === 'stopped' ? 'Остановлено' : 'Ошибка'}</span>
               <span className="font-mono text-[12px] text-mist tabular-nums">{job.done}/{job.total}</span>
             </div>
             <div className="h-1.5 rounded-full bg-hairline overflow-hidden mt-2"><div className="h-full bg-bronze transition-all" style={{ width: `${pct}%` }} /></div>

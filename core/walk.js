@@ -1,6 +1,6 @@
 // Разбор функции по шагам от ИИ: что происходит в каждом куске кода, с номерами строк.
 // Структуру (переменные, откуда и куда) находит разбор кода; модель пишет только текст.
-import { callModel, costOf, extractJson, LlmError } from './llm.js';
+import { callModel, costOf, batchCostOf, extractJson, LlmError } from './llm.js';
 import { SYSTEM_PROMPT } from './explain.js';
 
 const CHARS_PER_TOKEN = 3;
@@ -69,15 +69,110 @@ export async function runWalk(ctx, id) {
   const cost = costOf(provider, r.inTok, r.outTok);
   session.logUsage(provider.model, r.inTok, r.outTok, cost, `по шагам: ${p.it.name}`);
   ctx.settings.addSpend(cost);
-  let ans;
-  try { ans = extractJson(r.text); } catch { session.save(); throw new Error('Модель ответила не в том формате. Попробуйте ещё раз.'); }
-  const steps = (ans.steps || []).map((s) => ({
-    from: Math.max(p.it.line, Math.min(p.it.end, Number(s.from) || p.it.line)),
-    to: Math.max(p.it.line, Math.min(p.it.end, Number(s.to) || Number(s.from) || p.it.line)),
-    title: String(s.title || '').slice(0, 80), text: String(s.text || '').slice(0, 1500),
-  })).filter((s) => s.text).sort((a, b) => a.from - b.from);
-  if (!steps.length) { session.save(); throw new Error('Модель не вернула шагов.'); }
+  let steps;
+  try { steps = parseWalk(p.it, r.text); } catch (e) { session.save(); throw e; }
   session.saveWalk(id, steps, provider.model);
   session.save();
   return { cost, steps: steps.length };
+}
+
+/** Шаги из ответа модели; строки — только внутри функции. */
+export function parseWalk(it, text) {
+  let ans;
+  try { ans = extractJson(text); } catch { throw new Error('Модель ответила не в том формате. Попробуйте ещё раз.'); }
+  const steps = (ans.steps || []).map((s) => ({
+    from: Math.max(it.line, Math.min(it.end, Number(s.from) || it.line)),
+    to: Math.max(it.line, Math.min(it.end, Number(s.to) || Number(s.from) || it.line)),
+    title: String(s.title || '').slice(0, 80), text: String(s.text || '').slice(0, 1500),
+  })).filter((s) => s.text).sort((a, b) => a.from - b.from);
+  if (!steps.length) throw new Error('Модель не вернула шагов.');
+  return steps;
+}
+
+// ---- разбор по шагам для многих функций сразу ----
+export const MIN_WALK_LINES = 4; // совсем короткие функции по шагам не разбираем — там нечего делить
+const WALK_KINDS = new Set(['function', 'method', 'component', 'hook', 'route']);
+
+/** Какие функции разбирать: scope { kind: 'all'|'file'|'item', file?, id?, force? }. */
+export function walkTargets(view, scope) {
+  const walks = view.walks || {};
+  return view.items.filter((it) => {
+    if (scope.kind === 'item') return it.id === scope.id;
+    if (scope.kind === 'file' && it.file !== scope.file) return false;
+    if (!WALK_KINDS.has(it.kind) || it.end - it.line + 1 < MIN_WALK_LINES) return false;
+    return scope.force || walks[it.id]?.hash !== it.hash;
+  });
+}
+
+/** План: запросы, оценка обычной и пакетной цены. */
+export function walkPlanAll(view, getCode, flowOf, scope, provider) {
+  const targets = walkTargets(view, scope);
+  let estIn = 0, estOut = 0;
+  const reqs = targets.map((it) => {
+    const p = walkPlan(view, getCode, flowOf, it.id, provider);
+    estIn += p.estIn; estOut += p.estOut;
+    return { it, user: p.user };
+  });
+  const skipped = scope.kind === 'item' ? 0 : view.items.filter((it) => (scope.kind !== 'file' || it.file === scope.file) && WALK_KINDS.has(it.kind) && it.end - it.line + 1 < MIN_WALK_LINES).length;
+  return {
+    reqs, count: targets.length, skipped, estIn, estOut,
+    estCost: costOf(provider, estIn, estOut), estBatchCost: batchCostOf(provider, estIn, estOut),
+    priced: Number(provider.priceIn) > 0 || Number(provider.priceOut) > 0,
+  };
+}
+
+/**
+ * Разобрать по шагам все функции из scope. ctx — как у runExplain.
+ * Три запроса идут одновременно; готовое сохраняется сразу, остановка ничего не теряет.
+ */
+export async function runWalkAll(ctx, scope) {
+  const { session, provider, apiKey, onProgress = () => {}, signal } = ctx;
+  const view = session.view();
+  const p = walkPlanAll(view, (f) => session.code(f), (x) => session.flow(x), scope, provider);
+  const budget = Number(scope.budgetUsd ?? ctx.settings.data.budgetUsd) || 0;
+  const st = { done: 0, total: p.count, spent: 0, inTok: 0, outTok: 0, file: '', log: [], status: 'running', errors: 0, what: 'walk' };
+  const log = (m) => { if (m) st.log.push(m); if (st.log.length > 200) st.log.shift(); onProgress({ ...st }); };
+  const perReq = p.count ? p.estCost / p.count : 0;
+  log(`План: разобрать по шагам ${p.count} функций${p.skipped ? ` (совсем короткие — ${p.skipped} — пропускаю)` : ''}.`);
+  let next = 0;
+  let fatal = null;
+  async function worker() {
+    while (next < p.reqs.length && !fatal) {
+      if (signal?.aborted) { st.status = 'stopped'; return; }
+      if (p.priced && budget > 0 && st.spent + perReq > budget) {
+        if (st.status === 'running') { st.status = 'budget'; log(`Остановлено по бюджету: потрачено $${st.spent.toFixed(3)} из $${budget}. Готовое сохранено.`); }
+        return;
+      }
+      const { it, user } = p.reqs[next++];
+      st.file = it.name;
+      onProgress({ ...st });
+      let r = null;
+      for (let attempt = 0; ; attempt++) {
+        try { r = await callModel(provider, apiKey, { system: SYSTEM_PROMPT, user, maxTokens: 4000 }, { fetchFn: ctx.fetchFn, signal }); break; } catch (e) {
+          if (e instanceof LlmError && (e.status === 401 || e.status === 403 || e.status === 404)) { fatal = e; return; }
+          if (!(e instanceof LlmError) || !e.retryable || attempt >= 2 || signal?.aborted) { st.errors += 1; log(`${it.name}: не получилось (${e.message}).`); break; }
+          log(`Повтор через ${[3, 8][attempt]} с: ${e.message}`);
+          await new Promise((res) => setTimeout(res, [3000, 8000][attempt]));
+        }
+      }
+      if (!r) continue;
+      const cost = costOf(provider, r.inTok, r.outTok);
+      st.spent += cost; st.inTok += r.inTok; st.outTok += r.outTok;
+      session.logUsage(provider.model, r.inTok, r.outTok, cost, `по шагам: ${it.name}`);
+      ctx.settings.addSpend(cost);
+      try {
+        session.saveWalk(it.id, parseWalk(it, r.text), provider.model, it.hash);
+        session.save();
+        st.done += 1;
+      } catch (e) { st.errors += 1; log(`${it.name}: ${e.message}`); }
+      onProgress({ ...st });
+    }
+  }
+  await Promise.all([worker(), worker(), worker()]);
+  session.save();
+  st.file = '';
+  if (fatal) { st.status = 'error'; log(`Ошибка: ${fatal.message}`); return st; }
+  if (st.status === 'running') st.status = signal?.aborted ? 'stopped' : 'done';
+  log(st.status === 'done' ? `Готово: разобрано по шагам ${st.done} из ${st.total}.` : st.status === 'stopped' ? 'Остановлено. Готовое сохранено.' : '');
+  return st;
 }

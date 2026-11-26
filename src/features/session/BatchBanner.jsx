@@ -32,7 +32,7 @@ export default function BatchBanner({ view }) {
       setLost(r.state === 'lost');
       if (r.state === 'applied') {
         const x = r.result;
-        dispatch(toast(`Пакет готов: объяснено ${x.done} из ${x.total}${x.errors ? `, не получилось ${x.errors}` : ''}. Потрачено ${usd(x.spent)}.`, x.errors ? 'error' : undefined));
+        dispatch(toast(`Пакет готов: ${x.what === 'walk' ? 'разобрано по шагам' : 'объяснено'} ${x.done} из ${x.total}${x.errors ? `, не получилось ${x.errors}` : ''}. Потрачено ${usd(x.spent)}.`, x.errors ? 'error' : undefined));
         dispatch(refreshSessions());
       }
       if (r.state !== 'busy') await dispatch(reloadSession(view.id));
@@ -58,7 +58,7 @@ export default function BatchBanner({ view }) {
       <div className="min-w-0 flex-1 leading-relaxed">
         <div>
           <b className="text-bronze">{b.canceling ? 'Пакет отменяется' : 'Пакет у модели'}</b>
-          {' · '}{b.count} функций · отправлен {since(b.created)} · оценка {usd(b.estCost)}
+          {' · '}{b.what === 'walk' ? 'разбор по шагам · ' : ''}{b.count} функций · отправлен {since(b.created)} · оценка {usd(b.estCost)}
           {last.total ? <> · готово запросов {last.done} из {last.total}</> : null}
         </div>
         <div className="text-mist text-[12px]">

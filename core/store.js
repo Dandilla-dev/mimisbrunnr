@@ -192,8 +192,13 @@ export class Session {
     for (const v of rows(this.db, 'SELECT id, hash, json FROM walk_versions')) if (cur[v.id] === v.hash) out[v.id] = JSON.parse(v.json);
     return out;
   }
-  saveWalk(id, steps, model) {
+  /** hash — версия кода, для которой писали разбор (пакет мог прийти, когда в разборе уже другая ветка). */
+  saveWalk(id, steps, model, hash = null) {
     const it = rows(this.db, 'SELECT hash FROM items WHERE id=?', [id])[0];
+    if (hash && it?.hash !== hash) {
+      this.db.run('INSERT OR REPLACE INTO walk_versions VALUES (?,?,?)', [id, hash, JSON.stringify({ hash, steps, model, updated: now() })]);
+      return;
+    }
     this.db.run('INSERT OR REPLACE INTO walks VALUES (?,?,?,?,?)', [id, it?.hash || '', JSON.stringify(steps), model, now()]);
     this.db.run('INSERT OR REPLACE INTO walk_versions VALUES (?,?,?)', [id, it?.hash || '', JSON.stringify({ hash: it?.hash || '', steps, model, updated: now() })]);
   }

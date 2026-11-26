@@ -68,7 +68,7 @@ export default function App() {
       if (st.status !== 'running') {
         dispatch(reloadSession(st.id));
         dispatch(refreshSessions());
-        if (st.status === 'done') dispatch(toast(`Готово: объяснено ${st.done} из ${st.total}.`));
+        if (st.status === 'done') dispatch(toast(`Готово: ${st.what === 'walk' ? 'разобрано по шагам' : 'объяснено'} ${st.done} из ${st.total}.`));
         if (st.status === 'budget') dispatch(toast('Остановился по лимиту бюджета. Готовое сохранено.'));
         if (st.status === 'error') dispatch(toast(st.log?.filter(Boolean).slice(-1)[0] || 'Ошибка при объяснении', 'error'));
       }

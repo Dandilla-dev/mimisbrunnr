@@ -2,6 +2,7 @@
 // файлам отдаёт модели вместе со связями из графа. Модель пишет только
 // текст; структуру (функции, строки, связи) она не придумывает.
 import { callModel, costOf, extractJson, LlmError, batchCostOf, batchUnsupported, submitBatch, batchStatus, batchResults, cancelBatch } from './llm.js';
+import { walkPlanAll, parseWalk } from './walk.js';
 
 const KIND_RU = { function: 'функция', method: 'метод', class: 'класс', component: 'React-компонент', hook: 'React-хук', route: 'маршрут', entity: 'сущность' };
 const ORM_RU = { sequelize: 'Sequelize', mongoose: 'Mongoose', typeorm: 'TypeORM', prisma: 'Prisma', sqlalchemy: 'SQLAlchemy', sqlmodel: 'SQLModel', pydantic: 'Pydantic (схема данных)', dataclass: 'dataclass', django: 'Django', dto: 'DTO с проверками' };
@@ -300,7 +301,7 @@ export async function runExplain(ctx, scope) {
 // (максимум 24 ч), цена вдвое ниже. Пакет записан в разборе, поэтому приложение
 // можно закрыть: результаты заберутся при следующем открытии.
 
-const pub = (job) => job && { id: job.id, created: job.created, count: job.count, requests: job.requests, estCost: job.estCost, model: job.provider.model, overview: job.overview, canceling: Boolean(job.canceling), last: job.last || null, scope: job.scope };
+const pub = (job) => job && { id: job.id, created: job.created, count: job.count, requests: job.requests, estCost: job.estCost, model: job.provider.model, overview: job.overview, canceling: Boolean(job.canceling), last: job.last || null, scope: job.scope, what: job.what || 'expl' };
 export const batchInfo = (session) => pub(session.meta('batch_job', null));
 
 /** Отправить пакет. ctx: { session, settings, provider, apiKey, fetchFn } */
@@ -311,6 +312,7 @@ export async function startBatch(ctx, scope) {
   if (why) throw new Error(why);
   const view = session.view();
   const getCode = (f) => session.code(f);
+  if (scope.what === 'walk') return startWalkBatch(ctx, scope, view, getCode);
   const p = plan(view, getCode, scope, provider);
   if (!p.batches.length) throw new Error('Здесь всё уже объяснено — пакет не нужен.');
   const budget = Number(scope.budgetUsd ?? ctx.settings.data.budgetUsd) || 0;
@@ -329,6 +331,28 @@ export async function startBatch(ctx, scope) {
     id: batchId, created: new Date().toISOString(), count: p.count, requests: reqs.length, estCost: p.estBatchCost,
     provider: { type: provider.type, baseUrl: provider.baseUrl || '', model: provider.model, priceIn: provider.priceIn, priceOut: provider.priceOut },
     overview: p.overview, map, scope: { kind: scope.kind, file: scope.file, id: scope.id },
+  };
+  session.setMeta('batch_job', job);
+  session.save();
+  return pub(job);
+}
+
+async function startWalkBatch(ctx, scope, view, getCode) {
+  const { session, provider, apiKey } = ctx;
+  const p = walkPlanAll(view, getCode, (x) => session.flow(x), scope, provider);
+  if (!p.count) throw new Error('Здесь всё уже разобрано по шагам — пакет не нужен.');
+  const budget = Number(scope.budgetUsd ?? ctx.settings.data.budgetUsd) || 0;
+  if (p.priced && budget > 0 && p.estBatchCost > budget) throw new Error(`Оценка ~$${p.estBatchCost.toFixed(3)} больше лимита на запуск ($${budget}). Поднимите лимит или разберите один файл.`);
+  const map = {};
+  const reqs = p.reqs.map(({ it, user }, k) => {
+    map[`w${k}`] = { walk: it.id, name: it.name, file: it.file, line: it.line, end: it.end, hash: it.hash };
+    return { id: `w${k}`, system: SYSTEM_PROMPT, user, maxTokens: 4000 };
+  });
+  const { batchId } = await submitBatch(provider, apiKey, reqs, { fetchFn: ctx.fetchFn });
+  const job = {
+    id: batchId, created: new Date().toISOString(), count: p.count, requests: reqs.length, estCost: p.estBatchCost, what: 'walk',
+    provider: { type: provider.type, baseUrl: provider.baseUrl || '', model: provider.model, priceIn: provider.priceIn, priceOut: provider.priceOut },
+    overview: false, map, scope: { kind: scope.kind, file: scope.file, id: scope.id, what: 'walk' },
   };
   session.setMeta('batch_job', job);
   session.save();
@@ -362,11 +386,15 @@ export async function checkBatch(ctx) {
     const b = job.map[r.id];
     if (!b || seen.has(r.id)) continue;
     seen.add(r.id);
-    if (!r.ok) { st.errors += b.ids.length; st.log.push(`${b.file}: модель не ответила (${r.error}).`); continue; }
+    if (!r.ok) { st.errors += b.walk ? 1 : b.ids.length; st.log.push(`${b.walk ? b.name : b.file}: модель не ответила (${r.error}).`); continue; }
     const cost = batchCostOf(provider, r.inTok, r.outTok);
     st.spent += cost; st.inTok += r.inTok; st.outTok += r.outTok;
-    session.logUsage(provider.model, r.inTok, r.outTok, cost, `пакет · ${b.file}: ${b.ids.length}`);
+    session.logUsage(provider.model, r.inTok, r.outTok, cost, b.walk ? `пакет · по шагам: ${b.name}` : `пакет · ${b.file}: ${b.ids.length}`);
     ctx.settings.addSpend(cost);
+    if (b.walk) {
+      try { session.saveWalk(b.walk, parseWalk(b, r.text), provider.model, b.hash); st.done += 1; } catch (e) { st.errors += 1; st.log.push(`${b.name}: ${e.message}`); }
+      continue;
+    }
     let ans;
     try { ans = extractJson(r.text); } catch { st.errors += b.ids.length; st.log.push(`${b.file}: ${r.truncated ? 'ответ обрезан' : 'ответ не в том формате'} — объясните этот файл ещё раз обычным способом.`); continue; }
     // функция могла исчезнуть из кода, пока пакет шёл: берём её имя из ответа по сохранённому id
@@ -375,7 +403,7 @@ export async function checkBatch(ctx) {
     st.done += n;
     if (n < b.ids.length) st.errors += b.ids.length - n;
   }
-  for (const [k, b] of Object.entries(job.map)) if (!seen.has(k)) st.errors += b.ids.length; // отменённые и просроченные
+  for (const [k, b] of Object.entries(job.map)) if (!seen.has(k)) st.errors += b.walk ? 1 : b.ids.length; // отменённые и просроченные
   session.save();
   if (job.overview && st.done > 0 && !s.canceling && !job.canceling) {
     try {
@@ -384,9 +412,10 @@ export async function checkBatch(ctx) {
     } catch (e) { st.log.push(`Обзор проекта не получился: ${e.message}`); }
   }
   if (job.canceling) st.status = 'stopped';
-  st.log.push(`Пакет: объяснено ${st.done} из ${st.total}${st.errors ? `, не получилось ${st.errors}` : ''}.`);
+  st.what = job.what || 'expl';
+  st.log.push(`Пакет: ${st.what === 'walk' ? 'разобрано по шагам' : 'объяснено'} ${st.done} из ${st.total}${st.errors ? `, не получилось ${st.errors}` : ''}.`);
   session.setMeta('batch_job', null);
-  session.setMeta('batch_last', { at: new Date().toISOString(), done: st.done, total: st.total, errors: st.errors, spent: st.spent, log: st.log.slice(-20) });
+  session.setMeta('batch_last', { at: new Date().toISOString(), done: st.done, total: st.total, errors: st.errors, spent: st.spent, what: st.what, log: st.log.slice(-20) });
   session.save();
   return { state: 'applied', info: null, result: st };
 }

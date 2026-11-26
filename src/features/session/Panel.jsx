@@ -72,6 +72,13 @@ function Crumbs({ view, ix }) {
   );
 }
 
+// сколько функций разобрано по шагам (короткие, до 3 строк, не считаем — как и при разборе)
+const WALK_KINDS = new Set(['function', 'method', 'component', 'hook', 'route']);
+function walkStats(view, file = null) {
+  const list = view.items.filter((it) => WALK_KINDS.has(it.kind) && it.end - it.line + 1 >= 4 && (!file || it.file === file));
+  return { total: list.length, done: list.filter((it) => view.walks?.[it.id]?.hash === it.hash).length };
+}
+
 // ---------------------------------------------------------------- с чего начать (кратко, в обзоре)
 function StartCard({ view, ix }) {
   const dispatch = useDispatch();
@@ -135,6 +142,19 @@ function Overview({ view, ix, onExplain }) {
         </div>
         <div className="h-1.5 rounded-full bg-hairline overflow-hidden mt-4"><div className="h-full bg-bronze" style={{ width: `${pct}%` }} /></div>
         {(c.stale > 0 || view.orphans.length > 0) && <button className="btn-ghost mt-3 -ml-2.5" onClick={() => dispatch(go({ t: 'todo' }))}>Показать, что требует внимания →</button>}
+        {(() => {
+          const ws = walkStats(view);
+          if (!ws.total) return null;
+          return (
+            <div className="flex items-center justify-between gap-4 flex-wrap mt-4 pt-4 border-t border-hairline-soft">
+              <div>
+                <div className="text-[14px]">Разобрано по шагам <b className="tabular-nums">{ws.done}</b> из {ws.total}</div>
+                <div className="text-[12px] text-mist mt-1">Код каждой функции делится на куски, и каждый объясняется: какие данные откуда приходят и куда уходят.</div>
+              </div>
+              {ws.done < ws.total && <button className="btn" onClick={() => onExplain({ kind: 'all', what: 'walk' })}><SparkIcon className="w-4 h-4" />Разобрать по шагам все ({ws.total - ws.done})</button>}
+            </div>
+          );
+        })()}
       </div>
 
       <div className="mt-6 text-[13.5px] text-mist leading-relaxed">
@@ -207,6 +227,7 @@ function FileView({ view, ix, file, line, onExplain }) {
         </div>
         <div className="flex-1" />
         {nf > 0 && <button className="btn" onClick={() => onExplain({ kind: 'file', file })}><SparkIcon className="w-4 h-4" />Объяснить файл ({nf})</button>}
+        {(() => { const ws = walkStats(view, file); return ws.done < ws.total ? <button className="btn" onClick={() => onExplain({ kind: 'file', file, what: 'walk' })}><SparkIcon className="w-4 h-4" />По шагам ({ws.total - ws.done})</button> : null; })()}
       </div>
       {tab === 'fns' ? (
         <div className="flex flex-col gap-0.5 max-w-[900px]">

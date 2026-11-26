@@ -18,7 +18,7 @@ function analyzeOffThread(sources) {
 import { plan, runExplain, startBatch, checkBatch, stopBatch } from './explain.js';
 import { callModel, PRESETS, costOf, batchUnsupported } from './llm.js';
 import { storyPlan, runStory } from './story.js';
-import { walkPlan, runWalk } from './walk.js';
+import { walkPlan, runWalk, walkPlanAll, runWalkAll } from './walk.js';
 
 export class MimisCore {
   constructor(dataDir, { crypt = null, fetchFn = fetch, log = () => {} } = {}) {
@@ -155,6 +155,14 @@ export class MimisCore {
 
   async estimate(id, scope) {
     const s = await this.sessions.get(id);
+    if (scope.what === 'walk') {
+      const p = walkPlanAll(s.view(), (f) => s.code(f), (x) => s.flow(x), scope, this.settings.data.provider);
+      const job = s.meta('batch_job', null);
+      return {
+        what: 'walk', count: p.count, skipped: p.skipped, requests: p.count, estIn: p.estIn, estOut: p.estOut, estCost: p.estCost, priced: p.priced, overview: false,
+        batch: { why: job ? 'Пакет уже отправлен — дождитесь результатов.' : batchUnsupported(this.settings.data.provider), estCost: p.estBatchCost },
+      };
+    }
     const p = plan(s.view(), (f) => s.code(f), scope, this.settings.data.provider);
     const job = s.meta('batch_job', null);
     return {
@@ -169,10 +177,10 @@ export class MimisCore {
     const ctrl = new AbortController();
     const job = { ctrl, state: { status: 'running', log: [], done: 0, total: 0, spent: 0 } };
     this.jobs.set(id, job);
-    const promise = runExplain({
+    const promise = (scope.what === 'walk' ? runWalkAll : runExplain)({
       session: s, settings: this.settings, provider: this.settings.data.provider, apiKey: this.settings.apiKey(),
       fetchFn: this.fetchFn, signal: ctrl.signal,
-      onProgress: (st) => { job.state = st; onProgress(st); },
+      onProgress: (st) => { job.state = { ...st, scope }; onProgress(job.state); },
     }, scope).then((st) => { job.state = st; return st; })
       .finally(() => this.jobs.delete(id));
     return { promise };

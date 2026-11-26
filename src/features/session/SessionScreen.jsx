@@ -90,7 +90,7 @@ export default function SessionScreen() {
         </button>
         {running ? (
           <button className="btn border-bronze/50 text-bronze" onClick={() => setExplain(job.scope || { kind: 'all' })}>
-            <SparkIcon className="w-4 h-4 animate-spin" style={{ animationDuration: '3s' }} />Объясняю {job.done}/{job.total}
+            <SparkIcon className="w-4 h-4 animate-spin" style={{ animationDuration: '3s' }} />{job.what === 'walk' ? 'По шагам' : 'Объясняю'} {job.done}/{job.total}
           </button>
         ) : (
           <button className="btn-bronze" onClick={() => setExplain({ kind: 'all' })} disabled={view.counts.fresh === view.counts.total && view.layersSource === 'ai'}>
